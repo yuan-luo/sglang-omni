@@ -5,7 +5,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,9 @@ class Worker(ABC, Generic[InputT, OutputT]):
     """
 
     @abstractmethod
-    async def execute(self, batch: list[tuple[str, InputT]]) -> list[tuple[str, OutputT]]:
+    async def execute(
+        self, batch: list[tuple[str, InputT]]
+    ) -> list[tuple[str, OutputT]]:
         """Execute processing on a batch of inputs.
 
         Args:
@@ -40,15 +42,12 @@ class Worker(ABC, Generic[InputT, OutputT]):
         Returns:
             List of (request_id, output_data) tuples
         """
-        pass
 
     async def setup(self) -> None:
         """Optional setup hook called before processing starts."""
-        pass
 
     async def teardown(self) -> None:
         """Optional teardown hook called when worker stops."""
-        pass
 
 
 class EchoWorker(Worker[Any, Any]):
@@ -120,7 +119,9 @@ class FIFOScheduler:
         self._queue.append(item)
         self._pending[request_id] = item
         self._metrics["enqueued"] += 1
-        logger.debug("Scheduler enqueued req=%s, queue_size=%d", request_id, len(self._queue))
+        logger.debug(
+            "Scheduler enqueued req=%s, queue_size=%d", request_id, len(self._queue)
+        )
 
     def remove_pending(self, request_id: str) -> bool:
         """Remove a pending request from the queue (for abort).
@@ -138,7 +139,9 @@ class FIFOScheduler:
         del self._pending[request_id]
 
         # Remove from queue (O(n) but acceptable for now)
-        self._queue = deque(item for item in self._queue if item.request_id != request_id)
+        self._queue = deque(
+            item for item in self._queue if item.request_id != request_id
+        )
 
         self._metrics["aborted"] += 1
         logger.debug("Scheduler removed pending req=%s", request_id)

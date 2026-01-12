@@ -9,7 +9,6 @@ from sglang_omni.control_plane import StageControlPlane
 from sglang_omni.data_plane import SHMDataPlane
 from sglang_omni.scheduler import FIFOScheduler, Worker
 from sglang_omni.types import (
-    AbortMessage,
     CompleteMessage,
     DataReadyMessage,
     ShutdownMessage,
@@ -143,7 +142,9 @@ class Stage:
             # Data from previous stage
             await self._process_data_ready(msg)
         else:
-            logger.warning("Stage %s received unexpected message: %s", self.name, type(msg))
+            logger.warning(
+                "Stage %s received unexpected message: %s", self.name, type(msg)
+            )
 
     async def _process_submit(self, msg: SubmitMessage) -> None:
         """Process initial submission."""
@@ -162,7 +163,12 @@ class Stage:
     async def _process_data_ready(self, msg: DataReadyMessage) -> None:
         """Process data ready notification."""
         request_id = msg.request_id
-        logger.debug("Stage %s received data_ready: req=%s from %s", self.name, request_id, msg.from_stage)
+        logger.debug(
+            "Stage %s received data_ready: req=%s from %s",
+            self.name,
+            request_id,
+            msg.from_stage,
+        )
 
         # Check if aborted
         if request_id in self._aborted_requests:
@@ -178,7 +184,9 @@ class Stage:
             to_stage=self.name,
         )
         if result is None:
-            logger.error("Stage %s failed to get data for req=%s", self.name, request_id)
+            logger.error(
+                "Stage %s failed to get data for req=%s", self.name, request_id
+            )
             await self._send_failure(request_id, "Failed to read from SHM")
             return
 
@@ -217,7 +225,9 @@ class Stage:
         else:
             # Route to next stage
             next_stage, next_endpoint = next_info
-            logger.debug("Stage %s: routing req=%s to %s", self.name, request_id, next_stage)
+            logger.debug(
+                "Stage %s: routing req=%s to %s", self.name, request_id, next_stage
+            )
 
             # Write output to SHM
             success, metadata = self.data_plane.put(

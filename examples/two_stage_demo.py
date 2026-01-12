@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """Two-stage pipeline demo.
 
@@ -24,8 +23,6 @@ from typing import Any
 sys.path.insert(0, "/vllm-workspace/sglang-omni")
 
 from sglang_omni.coordinator import Coordinator
-from sglang_omni.scheduler import EchoWorker
-from sglang_omni.stage import Stage
 
 # Configure logging
 logging.basicConfig(
@@ -183,7 +180,9 @@ async def run_coordinator_main():
         # Check request state
         info = coordinator.get_request_info("req-abort-1")
         logger.info("Aborted request state: %s", info.state if info else "None")
-        assert info is not None and info.state.value == "aborted", "Request should be aborted"
+        assert (
+            info is not None and info.state.value == "aborted"
+        ), "Request should be aborted"
 
         logger.info("Test 3 PASSED!")
 
@@ -235,7 +234,11 @@ def main():
     stage1_proc.start()
     stage2_proc.start()
 
-    logger.info("Stage processes started: stage1=%d, stage2=%d", stage1_proc.pid, stage2_proc.pid)
+    logger.info(
+        "Stage processes started: stage1=%d, stage2=%d",
+        stage1_proc.pid,
+        stage2_proc.pid,
+    )
 
     try:
         # Give stages time to initialize

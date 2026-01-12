@@ -3,7 +3,6 @@
 
 import asyncio
 import logging
-from typing import Any
 
 import msgpack
 import zmq
@@ -21,12 +20,16 @@ from sglang_omni.types import (
 logger = logging.getLogger(__name__)
 
 
-def serialize_message(msg: DataReadyMessage | AbortMessage | CompleteMessage | SubmitMessage) -> bytes:
+def serialize_message(
+    msg: DataReadyMessage | AbortMessage | CompleteMessage | SubmitMessage,
+) -> bytes:
     """Serialize a message to bytes."""
     return msgpack.packb(msg.to_dict(), use_bin_type=True)
 
 
-def deserialize_message(data: bytes) -> DataReadyMessage | AbortMessage | CompleteMessage | SubmitMessage:
+def deserialize_message(
+    data: bytes,
+) -> DataReadyMessage | AbortMessage | CompleteMessage | SubmitMessage:
     """Deserialize bytes to a message."""
     d = msgpack.unpackb(data, raw=False)
     return parse_message(d)
@@ -67,7 +70,9 @@ class PushSocket:
         self._socket.connect(self.endpoint)
         logger.debug("PUSH socket connected to %s", self.endpoint)
 
-    async def send(self, msg: DataReadyMessage | AbortMessage | CompleteMessage | SubmitMessage) -> None:
+    async def send(
+        self, msg: DataReadyMessage | AbortMessage | CompleteMessage | SubmitMessage
+    ) -> None:
         """Send a message."""
         if self._socket is None:
             raise RuntimeError("Socket not connected")
@@ -101,7 +106,9 @@ class PullSocket:
             self._socket.connect(self.endpoint)
             logger.debug("PULL socket connected to %s", self.endpoint)
 
-    async def recv(self) -> DataReadyMessage | AbortMessage | CompleteMessage | SubmitMessage:
+    async def recv(
+        self,
+    ) -> DataReadyMessage | AbortMessage | CompleteMessage | SubmitMessage:
         """Receive a message (blocking)."""
         if self._socket is None:
             raise RuntimeError("Socket not started")
@@ -110,7 +117,9 @@ class PullSocket:
         logger.debug("PULL received %s", type(msg).__name__)
         return msg
 
-    async def recv_nowait(self) -> DataReadyMessage | AbortMessage | CompleteMessage | SubmitMessage | None:
+    async def recv_nowait(
+        self,
+    ) -> DataReadyMessage | AbortMessage | CompleteMessage | SubmitMessage | None:
         """Try to receive a message (non-blocking)."""
         if self._socket is None:
             raise RuntimeError("Socket not started")
@@ -249,7 +258,9 @@ class StageControlPlane:
             return msg
         raise ValueError(f"Unexpected message type: {type(msg)}")
 
-    async def send_to_stage(self, next_stage: str, next_stage_endpoint: str, msg: DataReadyMessage) -> None:
+    async def send_to_stage(
+        self, next_stage: str, next_stage_endpoint: str, msg: DataReadyMessage
+    ) -> None:
         """Send data ready notification to next stage."""
         if next_stage not in self._next_stage_sockets:
             sock = PushSocket(next_stage_endpoint)
@@ -319,7 +330,9 @@ class CoordinatorControlPlane:
 
         logger.info("Coordinator control plane started")
 
-    async def submit_to_stage(self, stage_name: str, stage_endpoint: str, msg: SubmitMessage) -> None:
+    async def submit_to_stage(
+        self, stage_name: str, stage_endpoint: str, msg: SubmitMessage
+    ) -> None:
         """Submit a request to a stage."""
         if stage_name not in self._stage_sockets:
             sock = PushSocket(stage_endpoint)

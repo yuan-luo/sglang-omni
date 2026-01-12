@@ -62,7 +62,9 @@ class SHMDataPlane:
                            0 means always use SHM (default for simplicity).
         """
         self.threshold = threshold_bytes
-        self._pending_segments: dict[str, list[SHMMetadata]] = {}  # request_id -> [metadata]
+        self._pending_segments: dict[str, list[SHMMetadata]] = (
+            {}
+        )  # request_id -> [metadata]
         self._metrics = {
             "puts": 0,
             "gets": 0,
@@ -138,7 +140,9 @@ class SHMDataPlane:
             # Remove from pending (it's been consumed)
             if request_id in self._pending_segments:
                 self._pending_segments[request_id] = [
-                    m for m in self._pending_segments[request_id] if m.name != metadata.name
+                    m
+                    for m in self._pending_segments[request_id]
+                    if m.name != metadata.name
                 ]
                 if not self._pending_segments[request_id]:
                     del self._pending_segments[request_id]
@@ -177,7 +181,12 @@ class SHMDataPlane:
                 # Already cleaned up
                 pass
             except Exception as e:
-                logger.warning("SHM cleanup failed for req %s, shm %s: %s", request_id, meta.name, e)
+                logger.warning(
+                    "SHM cleanup failed for req %s, shm %s: %s",
+                    request_id,
+                    meta.name,
+                    e,
+                )
 
         del self._pending_segments[request_id]
 

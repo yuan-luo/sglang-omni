@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """Three-stage pipeline demo.
 
@@ -22,8 +21,6 @@ from typing import Any
 sys.path.insert(0, "/vllm-workspace/sglang-omni")
 
 from sglang_omni.coordinator import Coordinator
-from sglang_omni.scheduler import EchoWorker
-from sglang_omni.stage import Stage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -184,15 +181,14 @@ async def run_coordinator_main():
             result = await coordinator.submit(req_id, value)
             return req_id, value, result
 
-        tasks = [
-            submit_request(f"req-concurrent-{i}", i + 1)
-            for i in range(5)
-        ]
+        tasks = [submit_request(f"req-concurrent-{i}", i + 1) for i in range(5)]
         results = await asyncio.gather(*tasks)
 
         for req_id, input_val, result in results:
             expected = ((input_val * 10 - 5) ** 2) + 1000
-            logger.info("%s: input=%d, expected=%d, got=%d", req_id, input_val, expected, result)
+            logger.info(
+                "%s: input=%d, expected=%d, got=%d", req_id, input_val, expected, result
+            )
             assert result == expected, f"{req_id}: Expected {expected}, got {result}"
 
         logger.info("Test 3 PASSED!")

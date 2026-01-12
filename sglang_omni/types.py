@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared types for SGLang-Omni pipeline."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
-
 
 # === Enums ===
 
@@ -178,7 +177,11 @@ class RequestInfo:
 # === Message Parsing Helper ===
 
 
-def parse_message(d: dict[str, Any]) -> DataReadyMessage | AbortMessage | CompleteMessage | SubmitMessage | ShutdownMessage:
+def parse_message(
+    d: dict[str, Any]
+) -> (
+    DataReadyMessage | AbortMessage | CompleteMessage | SubmitMessage | ShutdownMessage
+):
     """Parse a dict into the appropriate message type."""
     msg_type = d.get("type")
     if msg_type == "data_ready":

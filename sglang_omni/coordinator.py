@@ -153,7 +153,11 @@ class Coordinator:
             return False
 
         info = self._requests[request_id]
-        if info.state in (RequestState.COMPLETED, RequestState.FAILED, RequestState.ABORTED):
+        if info.state in (
+            RequestState.COMPLETED,
+            RequestState.FAILED,
+            RequestState.ABORTED,
+        ):
             return False
 
         # Broadcast abort to all stages
@@ -197,7 +201,9 @@ class Coordinator:
         )
 
         if request_id not in self._requests:
-            logger.warning("Coordinator received completion for unknown req=%s", request_id)
+            logger.warning(
+                "Coordinator received completion for unknown req=%s", request_id
+            )
             return
 
         info = self._requests[request_id]

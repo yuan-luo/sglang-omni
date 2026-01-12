@@ -2,12 +2,12 @@
 """SGLang-Omni: Multi-stage pipeline framework for omni models."""
 
 from sglang_omni.types import (
-    RequestState,
-    StageInfo,
-    DataReadyMessage,
     AbortMessage,
     CompleteMessage,
+    DataReadyMessage,
+    RequestState,
     SHMMetadata,
+    StageInfo,
 )
 
 __version__ = "0.1.0"
