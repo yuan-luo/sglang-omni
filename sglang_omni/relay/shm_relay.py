@@ -7,6 +7,7 @@ from multiprocessing import shared_memory as _shm
 from typing import Any
 
 from sglang_omni.core.types import SHMMetadata
+from sglang_omni.relay.base_operations import BaseReadableOperation, BaseReadOperation
 from sglang_omni.relay.descriptor import Descriptor
 from sglang_omni.relay.ralay import Ralay
 
@@ -47,7 +48,7 @@ def shm_read_bytes(meta: SHMMetadata) -> bytes:
     return data
 
 
-class SHMReadableOperation:
+class SHMReadableOperation(BaseReadableOperation):
     """Operation object returned by SHMRelay.put(), compatible with NixlRalay interface.
 
     Provides:
@@ -66,7 +67,7 @@ class SHMReadableOperation:
         """Wait for the operation to complete. No-op for SHM (synchronous)."""
 
 
-class SHMReadOperation:
+class SHMReadOperation(BaseReadOperation):
     """Operation object returned by SHMRelay.get(), compatible with NixlRalay interface.
 
     Provides:
@@ -76,7 +77,12 @@ class SHMReadOperation:
 
     def __init__(self, data: Any, size: int):
         self.data = data
-        self.size = size
+        self._size = size
+
+    @property
+    def size(self) -> int:
+        """Return the size of the data in bytes."""
+        return self._size
 
     def wait_for_completion(self) -> None:
         """Wait for the operation to complete. No-op for SHM (synchronous)."""

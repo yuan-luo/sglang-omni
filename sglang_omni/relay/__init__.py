@@ -7,10 +7,13 @@ between pipeline stages:
 - NixlRalay: NIXL-based RDMA relay for distributed transfers
 """
 
+from sglang_omni.relay.base_operations import BaseReadableOperation, BaseReadOperation
 from sglang_omni.relay.ralay import Ralay
 from sglang_omni.relay.shm_relay import SHMReadableOperation, SHMReadOperation, SHMRelay
 
 __all__ = [
+    "BaseReadOperation",
+    "BaseReadableOperation",
     "Ralay",
     "SHMRelay",
     "SHMReadableOperation",
