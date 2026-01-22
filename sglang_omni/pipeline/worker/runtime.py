@@ -103,7 +103,7 @@ class Worker:
                     f"(expected={request_id} got={output_payload.request_id})"
                 )
 
-            # Determine next stage
+            # Determine next stage(s).
             next_stage = self.stage.get_next(request_id, output_payload)
 
             # Route
@@ -115,8 +115,21 @@ class Worker:
             else:
                 if stream_task is not None:
                     await self._finish_stream_task(stream_task)
-                # Send to next stage
-                await self._send_to_next(request_id, next_stage, output_payload)
+                # Fan-out: send the same payload to multiple stages.
+                if isinstance(next_stage, str):
+                    next_stages = [next_stage]
+                elif isinstance(next_stage, list):
+                    next_stages = next_stage
+                else:
+                    raise TypeError(
+                        "get_next must return a stage name, list of stage names, or None"
+                    )
+
+                if not next_stages:
+                    raise ValueError("get_next returned an empty stage list")
+
+                for stage_name in next_stages:
+                    await self._send_to_next(request_id, stage_name, output_payload)
 
         except asyncio.CancelledError:
             logger.debug("Worker: request %s cancelled", request_id)
