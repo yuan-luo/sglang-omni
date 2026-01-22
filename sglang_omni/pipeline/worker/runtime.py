@@ -116,19 +116,7 @@ class Worker:
                 if stream_task is not None:
                     await self._finish_stream_task(stream_task)
                 # Fan-out: send the same payload to multiple stages.
-                if isinstance(next_stage, str):
-                    next_stages = [next_stage]
-                elif isinstance(next_stage, list):
-                    next_stages = next_stage
-                else:
-                    raise TypeError(
-                        "get_next must return a stage name, list of stage names, or None"
-                    )
-
-                if not next_stages:
-                    raise ValueError("get_next returned an empty stage list")
-
-                for stage_name in next_stages:
+                for stage_name in self._normalize_next_stages(next_stage):
                     await self._send_to_next(request_id, stage_name, output_payload)
 
         except asyncio.CancelledError:
@@ -163,6 +151,20 @@ class Worker:
         if len(payloads) != 1:
             raise ValueError("Multiple inputs require a merge function")
         return next(iter(payloads.values()))
+
+    @staticmethod
+    def _normalize_next_stages(next_stage: str | list[str]) -> list[str]:
+        match next_stage:
+            case str() as stage:
+                return [stage]
+            case list() as stages if stages:
+                return stages
+            case list():
+                raise ValueError("get_next returned an empty stage list")
+            case _:
+                raise TypeError(
+                    "get_next must return a stage name, list of stage names, or None"
+                )
 
     async def _send_complete(self, request_id: str, result: Any) -> None:
         """Send completion to coordinator."""
