@@ -33,3 +33,6 @@ htmlcov/
 Thumbs.db
 .ruff_cache/
 uv.lock
+
+# trae
+trae_output/

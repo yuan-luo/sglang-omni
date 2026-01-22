@@ -242,7 +242,7 @@ async def run_coordinator_main(relay_type: str):
 
         result = await coordinator.submit("req-normal-1", input_val)
         logger.info("Result: %d", result)
-        assert result == expected, f"Expected {expected}, got {result}"
+        assert result["value"] == expected, f"Expected {expected}, got {result}"
         logger.info("Test 1 PASSED!")
 
         # Test 2: Early exit (skip decoder)
@@ -259,8 +259,8 @@ async def run_coordinator_main(relay_type: str):
         logger.info("Expected: preprocessor outputs -5, encoder early-exits with -5")
 
         result = await coordinator.submit("req-early-exit-1", input_val)
-        logger.info("Result: %d", result)
-        assert result == expected, f"Expected {expected}, got {result}"
+        logger.info("Result: %d", result["value"])
+        assert result["value"] == expected, f"Expected {expected}, got {result}"
         logger.info("Test 2 PASSED!")
 
         # Test 3: Multiple concurrent requests
@@ -280,7 +280,7 @@ async def run_coordinator_main(relay_type: str):
             logger.info(
                 "%s: input=%d, expected=%d, got=%d", req_id, input_val, expected, result
             )
-            assert result == expected, f"{req_id}: Expected {expected}, got {result}"
+            assert result["value"] == expected, f"{req_id}: Expected {expected}, got {result}"
 
         logger.info("Test 3 PASSED!")
 

@@ -216,7 +216,7 @@ async def run_coordinator_main(relay_type: str):
         result = await coordinator.submit("req-001", input_value)
 
         logger.info("Result: %s", result)
-        assert result == 120, f"Expected 120, got {result}"
+        assert result["value"] == 120, f"Expected 120, got {result}"
         logger.info("Test 1 PASSED!")
 
         # Test 2: Multiple requests
@@ -228,8 +228,8 @@ async def run_coordinator_main(relay_type: str):
             input_val = (i + 1) * 5
             expected = (input_val * 2) + 100
             result = await coordinator.submit(f"req-multi-{i}", input_val)
-            logger.info("Input=%d, Expected=%d, Got=%d", input_val, expected, result)
-            assert result == expected, f"Expected {expected}, got {result}"
+            logger.info("Input=%d, Expected=%d, Got=%d", input_val, expected, result["value"])
+            assert result["value"] == expected, f"Expected {expected}, got {result}"
 
         logger.info("Test 2 PASSED!")
 
