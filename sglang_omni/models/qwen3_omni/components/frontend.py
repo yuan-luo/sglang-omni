@@ -24,6 +24,7 @@ from sglang_omni.frontends import (
     ensure_image_list,
     normalize_messages,
 )
+from sglang_omni.models.qwen3_omni.io import PipelineState
 from sglang_omni.proto import StagePayload
 
 
@@ -203,18 +204,19 @@ class Qwen3OmniFrontend:
         if audio_cache_key:
             audio_encoder_inputs["cache_key"] = audio_cache_key
 
-        payload.data = {
-            "raw_inputs": inputs,
-            "mm_inputs": mm_inputs,
-            "prompt": {
+        state = PipelineState(
+            raw_inputs=inputs,
+            mm_inputs=mm_inputs,
+            prompt={
                 "prompt_text": prompt_text,
                 "input_ids": input_ids,
                 "attention_mask": attention_mask,
             },
-            "encoder_inputs": {
+            encoder_inputs={
                 "image_encoder": image_encoder_inputs,
                 "audio_encoder": audio_encoder_inputs,
             },
-            "stream_state": {"token_ids": [], "text": ""},
-        }
+            stream_state={"token_ids": [], "text": ""},
+        )
+        payload.data = state.to_dict()
         return payload

@@ -9,26 +9,26 @@ import torch
 from transformers import AutoTokenizer
 
 from sglang_omni.engines.omni import create_ar_engine, create_encoder_engine
-from sglang_omni.engines.omni.runtime import ARRequestData, EncoderRequestData
 from sglang_omni.executors import EngineExecutor, FrontendExecutor
 from sglang_omni.models.qwen3_omni.components.audio_encoder import Qwen3OmniAudioEncoder
 from sglang_omni.models.qwen3_omni.components.frontend import Qwen3OmniFrontend
 from sglang_omni.models.qwen3_omni.components.image_encoder import Qwen3OmniImageEncoder
 from sglang_omni.models.qwen3_omni.components.thinker import Qwen3OmniSplitThinker
 from sglang_omni.models.qwen3_omni.io import OmniEvent, ThinkerOutput
+from sglang_omni.models.qwen3_omni.pipeline.engine_io import (
+    apply_encoder_result,
+    apply_thinker_result,
+    build_encoder_request,
+    build_thinker_request,
+)
 from sglang_omni.models.qwen3_omni.pipeline.merge import decode_events
+from sglang_omni.models.qwen3_omni.pipeline.state_io import load_state, store_state
 from sglang_omni.models.qwen3_omni.pipeline.next_stage import (
     AUDIO_STAGE,
     IMAGE_STAGE,
     THINKER_STAGE,
 )
 from sglang_omni.proto import StagePayload
-
-
-def _ensure_data(payload: StagePayload) -> dict[str, Any]:
-    if not isinstance(payload.data, dict):
-        payload.data = {}
-    return payload.data
 
 
 def _event_to_dict(event: OmniEvent) -> dict[str, Any]:
@@ -62,42 +62,14 @@ def _create_encoder_executor(
     model: torch.nn.Module,
     device: str,
 ) -> EngineExecutor:
-    def _request_builder(payload: StagePayload) -> EncoderRequestData:
-        data = _ensure_data(payload)
-        encoder_inputs = data.get("encoder_inputs")
-        if not isinstance(encoder_inputs, dict):
-            return EncoderRequestData(input_dict={"_skip": True, "_result": {}})
-        inputs = encoder_inputs.get(stage_name)
-        if not isinstance(inputs, dict) or not inputs:
-            return EncoderRequestData(input_dict={"_skip": True, "_result": {}})
-        if inputs.get("_skip"):
-            skip_result = inputs.get("_result")
-            return EncoderRequestData(
-                input_dict=inputs,
-                output_dict=skip_result if isinstance(skip_result, dict) else {},
-            )
-        cache_key = inputs.get("cache_key")
-        return EncoderRequestData(
-            input_dict=inputs,
-            cache_key=str(cache_key) if cache_key is not None else None,
-        )
+    def _request_builder(payload: StagePayload):
+        state = load_state(payload)
+        return build_encoder_request(state, stage_name=stage_name)
 
     def _result_builder(payload: StagePayload, result: Any) -> StagePayload:
-        data = _ensure_data(payload)
-        encoder_outs = data.setdefault("encoder_outs", {})
-        engine_outputs = data.setdefault("engine_outputs", {})
-        if isinstance(result, EncoderRequestData):
-            if result.output_dict is not None:
-                encoder_out = result.output_dict
-            elif result.embeddings is not None:
-                encoder_out = result.embeddings
-            else:
-                encoder_out = {}
-        else:
-            encoder_out = result if isinstance(result, dict) else {"result": result}
-        encoder_outs[stage_name] = encoder_out
-        engine_outputs[stage_name] = encoder_out
-        return payload
+        state = load_state(payload)
+        apply_encoder_result(state, stage_name=stage_name, result=result)
+        return store_state(payload, state)
 
     engine = create_encoder_engine(model, device=device)
     return EngineExecutor(
@@ -138,71 +110,16 @@ def create_thinker_executor(
 
     step_counters: dict[str, int] = {}
 
-    def _request_builder(payload: StagePayload) -> ARRequestData:
-        data = _ensure_data(payload)
-        prompt = data.get("prompt")
-        if not isinstance(prompt, dict):
-            raise TypeError("prompt missing for thinker request")
-
-        input_ids = prompt.get("input_ids")
-        if not isinstance(input_ids, torch.Tensor):
-            raise TypeError("prompt.input_ids must be a torch.Tensor")
-
-        attention_mask = prompt.get("attention_mask")
-        thinker_inputs = data.get("thinker_inputs")
-        if not isinstance(thinker_inputs, dict):
-            thinker_inputs = data.get("engine_inputs", {}).get(THINKER_STAGE, {})
-        if not isinstance(thinker_inputs, dict):
-            thinker_inputs = {}
-
-        model_inputs = dict(thinker_inputs.get("model_inputs", {}))
-        if not model_inputs:
-            model_inputs = {
-                k: v
-                for k, v in thinker_inputs.items()
-                if k != "capture_model_output_keys"
-            }
-        capture_keys = thinker_inputs.get("capture_model_output_keys", ())
-        if "attention_mask" in model_inputs:
-            model_inputs.pop("attention_mask", None)
-
+    def _request_builder(payload: StagePayload):
+        state = load_state(payload)
         step_counters.pop(payload.request_id, None)
-
-        return ARRequestData(
-            input_ids=input_ids.to(dtype=torch.long),
-            attention_mask=(
-                attention_mask if isinstance(attention_mask, torch.Tensor) else None
-            ),
-            model_inputs=model_inputs,
-            capture_model_output_keys=tuple(capture_keys) if capture_keys else (),
-            max_new_tokens=payload.request.params.get("max_new_tokens"),
-            temperature=payload.request.params.get("temperature", 0.0),
-        )
+        return build_thinker_request(state, params=payload.request.params)
 
     def _result_builder(payload: StagePayload, result: Any) -> StagePayload:
-        data = _ensure_data(payload)
-        thinker_out: ThinkerOutput
-        if isinstance(result, ARRequestData):
-            output_ids = list(result.output_ids)
-            thinker_out = {
-                "output_ids": output_ids,
-                "step": len(output_ids),
-                "is_final": True,
-                "extra_model_outputs": dict(result.extra_model_outputs),
-            }
-        else:
-            thinker_out = {
-                "output_ids": [],
-                "step": 0,
-                "is_final": True,
-                "extra_model_outputs": {"result": result},
-            }
-
-        data["thinker_out"] = thinker_out
-        engine_outputs = data.setdefault("engine_outputs", {})
-        engine_outputs[THINKER_STAGE] = thinker_out
+        state = load_state(payload)
+        apply_thinker_result(state, stage_name=THINKER_STAGE, result=result)
         step_counters.pop(payload.request_id, None)
-        return payload
+        return store_state(payload, state)
 
     def _stream_builder(payload: StagePayload | None, item: Any) -> Any:
         if payload is None:
@@ -216,7 +133,7 @@ def create_thinker_executor(
         except Exception:
             return {"token_id": item, "step": step}
 
-        data = _ensure_data(payload)
+        state = load_state(payload)
         thinker_out: ThinkerOutput = {
             "output_ids": [token_id],
             "step": step,
@@ -225,12 +142,13 @@ def create_thinker_executor(
         events = list(
             decode_events(
                 thinker_out=thinker_out,
-                data=data,
+                state=state,
                 tokenizer=tokenizer,
                 eos_token_id=eos_token_id,
                 step=step,
             )
         )
+        store_state(payload, state)
         if eos_token_id is not None and token_id == eos_token_id and not events:
             events = [
                 OmniEvent(type="text_final", modality="text", payload={}, is_final=True)
@@ -262,10 +180,8 @@ def create_decode_executor(model_id: str) -> FrontendExecutor:
     eos_token_id = getattr(tokenizer, "eos_token_id", None)
 
     def _decode(payload: StagePayload) -> StagePayload:
-        data = _ensure_data(payload)
-        thinker_out = data.get("thinker_out")
-        if not isinstance(thinker_out, dict):
-            thinker_out = data.get("engine_outputs", {}).get(THINKER_STAGE, {})
+        state = load_state(payload)
+        thinker_out = state.thinker_out or state.engine_outputs.get(THINKER_STAGE)
         if not isinstance(thinker_out, dict):
             thinker_out = {
                 "output_ids": [],
@@ -278,7 +194,7 @@ def create_decode_executor(model_id: str) -> FrontendExecutor:
         events = list(
             decode_events(
                 thinker_out=thinker_out,
-                data=data,
+                state=state,
                 tokenizer=tokenizer,
                 eos_token_id=eos_token_id,
                 step=step,

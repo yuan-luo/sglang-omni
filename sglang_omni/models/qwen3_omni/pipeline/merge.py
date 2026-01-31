@@ -7,15 +7,9 @@ from typing import Any, Iterable
 
 import torch
 
-from sglang_omni.models.qwen3_omni.io import OmniEvent, ThinkerOutput
+from sglang_omni.models.qwen3_omni.io import OmniEvent, PipelineState, ThinkerOutput
 from sglang_omni.models.qwen3_omni.pipeline.next_stage import AUDIO_STAGE, IMAGE_STAGE
 from sglang_omni.proto import StagePayload
-
-
-def _ensure_data(payload: StagePayload) -> dict[str, Any]:
-    if not isinstance(payload.data, dict):
-        payload.data = {}
-    return payload.data
 
 
 def _as_tensor(value: Any, dtype: torch.dtype | None = None) -> torch.Tensor | None:
@@ -47,43 +41,34 @@ def _non_empty(tensor: torch.Tensor | None) -> bool:
 def merge_for_thinker(payloads: dict[str, StagePayload]) -> StagePayload:
     """Aggregate frontend + encoder outputs into thinker inputs."""
     base = payloads.get("frontend") or next(iter(payloads.values()))
-    data = _ensure_data(base)
-
+    state = PipelineState.from_dict(base.data)
     encoder_outs: dict[str, Any] = {}
-    existing = data.get("encoder_outs")
-    if isinstance(existing, dict):
-        encoder_outs.update(existing)
+    if state.encoder_outs:
+        encoder_outs.update(state.encoder_outs)
 
     for stage_name, payload in payloads.items():
-        stage_data = payload.data if isinstance(payload.data, dict) else {}
-        stage_encoder_outs = stage_data.get("encoder_outs")
-        if isinstance(stage_encoder_outs, dict) and stage_name in stage_encoder_outs:
-            encoder_outs[stage_name] = stage_encoder_outs[stage_name]
+        stage_state = PipelineState.from_dict(payload.data)
+        if stage_name in stage_state.encoder_outs:
+            encoder_outs[stage_name] = stage_state.encoder_outs[stage_name]
             continue
-        stage_engine_outputs = stage_data.get("engine_outputs")
-        if (
-            isinstance(stage_engine_outputs, dict)
-            and stage_name in stage_engine_outputs
-        ):
-            encoder_outs[stage_name] = stage_engine_outputs[stage_name]
+        if stage_name in stage_state.engine_outputs:
+            encoder_outs[stage_name] = stage_state.engine_outputs[stage_name]
 
-    thinker_inputs = build_thinker_inputs(data, encoder_outs)
+    thinker_inputs = build_thinker_inputs(state, encoder_outs)
 
-    data["encoder_outs"] = encoder_outs
-    data["thinker_inputs"] = thinker_inputs
-    engine_inputs = data.setdefault("engine_inputs", {})
-    engine_inputs["thinker"] = thinker_inputs
-    data["encoder_inputs"] = {}
-
-    _prune_frontend_for_thinker(data, encoder_outs)
+    state.encoder_outs = encoder_outs
+    state.thinker_inputs = thinker_inputs
+    state.encoder_inputs = {}
+    _prune_frontend_for_thinker(state, encoder_outs)
+    base.data = state.to_dict()
     return base
 
 
 def build_thinker_inputs(
-    frontend_data: dict[str, Any],
+    state: PipelineState,
     encoder_outs: dict[str, Any],
 ) -> dict[str, Any]:
-    mm_inputs = frontend_data.get("mm_inputs", {})
+    mm_inputs = state.mm_inputs
     mm_image = mm_inputs.get("image", {}) if isinstance(mm_inputs, dict) else {}
     mm_audio = mm_inputs.get("audio", {}) if isinstance(mm_inputs, dict) else {}
 
@@ -151,10 +136,10 @@ def build_thinker_inputs(
 
 
 def _prune_frontend_for_thinker(
-    frontend_data: dict[str, Any],
+    state: PipelineState,
     encoder_outs: dict[str, Any],
 ) -> None:
-    mm_inputs = frontend_data.get("mm_inputs", {})
+    mm_inputs = state.mm_inputs
     mm_image = mm_inputs.get("image", {}) if isinstance(mm_inputs, dict) else {}
     mm_audio = mm_inputs.get("audio", {}) if isinstance(mm_inputs, dict) else {}
 
@@ -184,7 +169,7 @@ def _prune_frontend_for_thinker(
         dtype=torch.long,
     )
 
-    frontend_data["mm_inputs"] = {
+    state.mm_inputs = {
         "image": {"image_grid_thw": image_grid_thw},
         "audio": {"audio_feature_lengths": audio_feature_lengths},
     }
@@ -193,7 +178,7 @@ def _prune_frontend_for_thinker(
 def decode_events(
     *,
     thinker_out: ThinkerOutput,
-    data: dict[str, Any],
+    state: PipelineState,
     tokenizer: Any,
     eos_token_id: int | None,
     step: int,
@@ -202,7 +187,9 @@ def decode_events(
     if not isinstance(output_ids, list) or not output_ids:
         return []
 
-    stream_state = data.setdefault("stream_state", {"token_ids": [], "text": ""})
+    stream_state = state.stream_state
+    if not stream_state:
+        stream_state.update({"token_ids": [], "text": ""})
     token_ids = stream_state.setdefault("token_ids", [])
     prev_text = str(stream_state.setdefault("text", ""))
 
