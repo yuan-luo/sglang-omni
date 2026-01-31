@@ -32,9 +32,28 @@ def create_text_first_pipeline_config(
     dtype: str | None = None,
     relay_type: str = "shm",
     fused_stages: list[list[str]] | None = None,
+    backend: str = "hf",
+    local_files_only: bool = False,
 ) -> PipelineConfig:
     def _relay(device: str) -> RelayConfig:
         return RelayConfig(type=relay_type, device=device)
+
+    use_torch = backend.lower() in {"torch", "torch_native", "native"}
+    image_factory = (
+        "sglang_omni.models.qwen3_omni.pipeline.stages.create_image_encoder_executor_torch"
+        if use_torch
+        else "sglang_omni.models.qwen3_omni.pipeline.stages.create_image_encoder_executor"
+    )
+    audio_factory = (
+        "sglang_omni.models.qwen3_omni.pipeline.stages.create_audio_encoder_executor_torch"
+        if use_torch
+        else "sglang_omni.models.qwen3_omni.pipeline.stages.create_audio_encoder_executor"
+    )
+    thinker_factory = (
+        "sglang_omni.models.qwen3_omni.pipeline.stages.create_thinker_executor_torch"
+        if use_torch
+        else "sglang_omni.models.qwen3_omni.pipeline.stages.create_thinker_executor"
+    )
 
     return PipelineConfig(
         name=name,
@@ -53,11 +72,12 @@ def create_text_first_pipeline_config(
             StageConfig(
                 name=IMAGE_STAGE,
                 executor=ExecutorConfig(
-                    factory="sglang_omni.models.qwen3_omni.pipeline.stages.create_image_encoder_executor",
+                    factory=image_factory,
                     args={
                         "model_id": model_id,
                         "device": image_device,
                         "dtype": dtype,
+                        "local_files_only": local_files_only,
                     },
                 ),
                 get_next="sglang_omni.models.qwen3_omni.pipeline.next_stage.encoder_next",
@@ -66,11 +86,12 @@ def create_text_first_pipeline_config(
             StageConfig(
                 name=AUDIO_STAGE,
                 executor=ExecutorConfig(
-                    factory="sglang_omni.models.qwen3_omni.pipeline.stages.create_audio_encoder_executor",
+                    factory=audio_factory,
                     args={
                         "model_id": model_id,
                         "device": audio_device,
                         "dtype": dtype,
+                        "local_files_only": local_files_only,
                     },
                 ),
                 get_next="sglang_omni.models.qwen3_omni.pipeline.next_stage.encoder_next",
@@ -93,12 +114,13 @@ def create_text_first_pipeline_config(
             StageConfig(
                 name=THINKER_STAGE,
                 executor=ExecutorConfig(
-                    factory="sglang_omni.models.qwen3_omni.pipeline.stages.create_thinker_executor",
+                    factory=thinker_factory,
                     args={
                         "model_id": model_id,
                         "device": thinker_device,
                         "dtype": dtype,
                         "max_seq_len": thinker_max_seq_len,
+                        "local_files_only": local_files_only,
                     },
                 ),
                 get_next="sglang_omni.models.qwen3_omni.pipeline.next_stage.thinker_next",

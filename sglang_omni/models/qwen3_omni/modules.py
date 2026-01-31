@@ -111,6 +111,24 @@ def apply_rotary_pos_emb(
     return q_embed, k_embed
 
 
+def apply_rotary_pos_emb_vision(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply rotary position embedding for vision blocks."""
+    orig_q_dtype = q.dtype
+    orig_k_dtype = k.dtype
+    q = q.float()
+    k = k.float()
+    cos = cos.unsqueeze(-2).float()
+    sin = sin.unsqueeze(-2).float()
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed.to(orig_q_dtype), k_embed.to(orig_k_dtype)
+
+
 # ---- Attention & MLP ----
 
 
@@ -818,3 +836,183 @@ class Code2WavDecoderBlock(nn.Module):
         for block in self.block:
             x = block(x)
         return x
+
+
+# ---- Vision Encoder Components ----
+
+
+def _vision_act_fn(name: str) -> nn.Module:
+    name = name.lower()
+    if name in {"silu", "swish"}:
+        return nn.SiLU()
+    if name in {"gelu", "gelu_new"}:
+        return nn.GELU()
+    if name in {"gelu_pytorch_tanh", "gelu_tanh"}:
+        return nn.GELU(approximate="tanh")
+    return nn.GELU()
+
+
+class VisionAttention(nn.Module):
+    """Vision attention block (SDPA)."""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        self.dim = int(config.get("hidden_size"))
+        self.num_heads = int(config.get("num_heads"))
+        self.head_dim = self.dim // self.num_heads
+        self.qkv = nn.Linear(self.dim, self.dim * 3, bias=True)
+        self.proj = nn.Linear(self.dim, self.dim)
+        self.scaling = self.head_dim**-0.5
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        seq_length = hidden_states.shape[0]
+        qkv = (
+            self.qkv(hidden_states)
+            .reshape(seq_length, 3, self.num_heads, self.head_dim)
+            .permute(1, 0, 2, 3)
+        )
+        query_states, key_states, value_states = qkv.unbind(0)
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb_vision(
+            query_states, key_states, cos, sin
+        )
+
+        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        attn_outputs: list[torch.Tensor] = []
+        start = 0
+        for length in lengths:
+            length = int(length)
+            end = start + length
+            q = query_states[start:end] * self.scaling
+            k = key_states[start:end]
+            v = value_states[start:end]
+            q = q.transpose(0, 1).unsqueeze(0)
+            k = k.transpose(0, 1).unsqueeze(0)
+            v = v.transpose(0, 1).unsqueeze(0)
+            attn = F.scaled_dot_product_attention(
+                q, k, v, dropout_p=0.0, is_causal=False
+            )
+            attn = attn.squeeze(0).transpose(0, 1)
+            attn_outputs.append(attn)
+            start = end
+
+        attn_output = torch.cat(attn_outputs, dim=0)
+        attn_output = attn_output.reshape(seq_length, -1).contiguous()
+        return self.proj(attn_output)
+
+
+class VisionPatchMerger(nn.Module):
+    """Patch merger for vision encoder outputs."""
+
+    def __init__(self, config: dict[str, Any], *, use_postshuffle_norm: bool) -> None:
+        super().__init__()
+        hidden_size = int(config.get("hidden_size"))
+        spatial_merge_size = int(config.get("spatial_merge_size"))
+        self.hidden_size = hidden_size * (spatial_merge_size**2)
+        self.use_postshuffle_norm = use_postshuffle_norm
+        norm_dim = self.hidden_size if use_postshuffle_norm else hidden_size
+        self.ln_q = nn.LayerNorm(norm_dim, eps=1e-6)
+        out_hidden_size = int(config.get("out_hidden_size", hidden_size))
+        self.mlp = nn.ModuleList(
+            [
+                nn.Linear(self.hidden_size, self.hidden_size),
+                nn.GELU(),
+                nn.Linear(self.hidden_size, out_hidden_size),
+            ]
+        )
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        if self.use_postshuffle_norm:
+            hidden = hidden.view(-1, self.hidden_size)
+        hidden = self.ln_q(hidden).view(-1, self.hidden_size)
+        for layer in self.mlp:
+            hidden = layer(hidden)
+        return hidden
+
+
+class VisionMLP(nn.Module):
+    """Vision MLP block."""
+
+    def __init__(self, config: dict[str, Any]):
+        super().__init__()
+        self.hidden_size = int(config.get("hidden_size"))
+        self.intermediate_size = int(config.get("intermediate_size"))
+        self.linear_fc1 = nn.Linear(self.hidden_size, self.intermediate_size, bias=True)
+        self.linear_fc2 = nn.Linear(self.intermediate_size, self.hidden_size, bias=True)
+        self.act_fn = _vision_act_fn(str(config.get("hidden_act", "gelu")))
+
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
+        return self.linear_fc2(self.act_fn(self.linear_fc1(hidden_state)))
+
+
+class VisionPatchEmbed(nn.Module):
+    """Vision patch embedding with Conv3d."""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        self.patch_size = int(config.get("patch_size"))
+        self.temporal_patch_size = int(config.get("temporal_patch_size"))
+        self.in_channels = int(config.get("in_channels"))
+        self.embed_dim = int(config.get("hidden_size"))
+        kernel_size = [self.temporal_patch_size, self.patch_size, self.patch_size]
+        self.proj = nn.Conv3d(
+            self.in_channels, self.embed_dim, kernel_size=kernel_size, stride=kernel_size, bias=True
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        target_dtype = self.proj.weight.dtype
+        hidden_states = hidden_states.view(
+            -1,
+            self.in_channels,
+            self.temporal_patch_size,
+            self.patch_size,
+            self.patch_size,
+        )
+        hidden_states = self.proj(hidden_states.to(dtype=target_dtype)).view(-1, self.embed_dim)
+        return hidden_states
+
+
+class VisionRotaryEmbedding(nn.Module):
+    """Rotary embedding for vision encoder."""
+
+    def __init__(self, dim: int, theta: float = 10000.0) -> None:
+        super().__init__()
+        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def forward(self, seqlen: int) -> torch.Tensor:
+        seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(seq, self.inv_freq)
+        return freqs
+
+
+class VisionBlock(nn.Module):
+    """Vision transformer block."""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        self.norm1 = nn.LayerNorm(int(config.get("hidden_size")), eps=1e-6)
+        self.norm2 = nn.LayerNorm(int(config.get("hidden_size")), eps=1e-6)
+        self.attn = VisionAttention(config=config)
+        self.mlp = VisionMLP(config=config)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        hidden_states = hidden_states + self.attn(
+            self.norm1(hidden_states),
+            cu_seqlens=cu_seqlens,
+            position_embeddings=position_embeddings,
+        )
+        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
+        return hidden_states

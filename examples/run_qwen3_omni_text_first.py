@@ -31,6 +31,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-path", type=str, default=None)
     parser.add_argument("--audio-path", type=str, default=None)
     parser.add_argument("--audio-target-sr", type=int, default=16000)
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="hf",
+        choices=["hf", "torch", "torch_native", "native"],
+        help="Model backend: hf (default) or torch-native.",
+    )
     return parser.parse_args()
 
 
@@ -43,6 +50,7 @@ async def main_async(args: argparse.Namespace) -> None:
         thinker_device=args.thinker_device,
         thinker_max_seq_len=args.thinker_max_seq_len,
         dtype=args.dtype,
+        backend=args.backend,
     )
     coordinator, stages = compile_pipeline(config)
     runner = PipelineRunner(coordinator, stages)

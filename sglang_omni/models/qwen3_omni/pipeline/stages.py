@@ -14,6 +14,15 @@ from sglang_omni.models.qwen3_omni.components.audio_encoder import Qwen3OmniAudi
 from sglang_omni.models.qwen3_omni.components.frontend import Qwen3OmniFrontend
 from sglang_omni.models.qwen3_omni.components.image_encoder import Qwen3OmniImageEncoder
 from sglang_omni.models.qwen3_omni.components.thinker import Qwen3OmniSplitThinker
+from sglang_omni.models.qwen3_omni.components.torch_audio_encoder import (
+    Qwen3OmniTorchAudioEncoder,
+)
+from sglang_omni.models.qwen3_omni.components.torch_image_encoder import (
+    Qwen3OmniTorchImageEncoder,
+)
+from sglang_omni.models.qwen3_omni.components.torch_thinker import (
+    Qwen3OmniTorchThinker,
+)
 from sglang_omni.models.qwen3_omni.io import OmniEvent, ThinkerOutput
 from sglang_omni.models.qwen3_omni.pipeline.engine_io import (
     apply_encoder_result,
@@ -87,6 +96,22 @@ def create_image_encoder_executor(
     return _create_encoder_executor(stage_name=IMAGE_STAGE, model=model, device=device)
 
 
+def create_image_encoder_executor_torch(
+    model_id: str,
+    *,
+    device: str = "cuda",
+    dtype: str | None = None,
+    local_files_only: bool = False,
+) -> EngineExecutor:
+    model = Qwen3OmniTorchImageEncoder(
+        model_id=model_id,
+        device=device,
+        dtype=dtype,
+        local_files_only=local_files_only,
+    )
+    return _create_encoder_executor(stage_name=IMAGE_STAGE, model=model, device=device)
+
+
 def create_audio_encoder_executor(
     model_id: str,
     *,
@@ -94,6 +119,22 @@ def create_audio_encoder_executor(
     dtype: str | None = None,
 ) -> EngineExecutor:
     model = Qwen3OmniAudioEncoder(model_id=model_id, device=device, dtype=dtype)
+    return _create_encoder_executor(stage_name=AUDIO_STAGE, model=model, device=device)
+
+
+def create_audio_encoder_executor_torch(
+    model_id: str,
+    *,
+    device: str = "cuda",
+    dtype: str | None = None,
+    local_files_only: bool = False,
+) -> EngineExecutor:
+    model = Qwen3OmniTorchAudioEncoder(
+        model_id=model_id,
+        device=device,
+        dtype=dtype,
+        local_files_only=local_files_only,
+    )
     return _create_encoder_executor(stage_name=AUDIO_STAGE, model=model, device=device)
 
 
@@ -105,6 +146,90 @@ def create_thinker_executor(
     max_seq_len: int = 8192,
 ) -> EngineExecutor:
     model = Qwen3OmniSplitThinker(model_id=model_id, device=device, dtype=dtype)
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+
+    step_counters: dict[str, int] = {}
+
+    def _request_builder(payload: StagePayload):
+        state = load_state(payload)
+        step_counters.pop(payload.request_id, None)
+        return build_thinker_request(state, params=payload.request.params)
+
+    def _result_builder(payload: StagePayload, result: Any) -> StagePayload:
+        state = load_state(payload)
+        apply_thinker_result(state, stage_name=THINKER_STAGE, result=result)
+        step_counters.pop(payload.request_id, None)
+        return store_state(payload, state)
+
+    def _stream_builder(payload: StagePayload | None, item: Any) -> Any:
+        if payload is None:
+            return None
+        request_id = payload.request_id
+        step = step_counters.get(request_id, 0) + 1
+        step_counters[request_id] = step
+
+        try:
+            token_id = int(item)
+        except Exception:
+            return {"token_id": item, "step": step}
+
+        state = load_state(payload)
+        thinker_out: ThinkerOutput = {
+            "output_ids": [token_id],
+            "step": step,
+            "is_final": False,
+        }
+        events = list(
+            decode_events(
+                thinker_out=thinker_out,
+                state=state,
+                tokenizer=tokenizer,
+                eos_token_id=eos_token_id,
+                step=step,
+            )
+        )
+        store_state(payload, state)
+        if eos_token_id is not None and token_id == eos_token_id and not events:
+            events = [
+                OmniEvent(type="text_final", modality="text", payload={}, is_final=True)
+            ]
+        return {
+            "events": [_event_to_dict(event) for event in events],
+            "token_id": token_id,
+            "step": step,
+            "stage": THINKER_STAGE,
+        }
+
+    engine = create_ar_engine(
+        model=model,
+        tokenizer=tokenizer,
+        max_seq_len=max_seq_len,
+        device=device,
+    )
+
+    return EngineExecutor(
+        engine=engine,
+        request_builder=_request_builder,
+        result_builder=_result_builder,
+        stream_builder=_stream_builder,
+    )
+
+
+def create_thinker_executor_torch(
+    model_id: str,
+    *,
+    device: str = "cuda",
+    dtype: str | None = None,
+    max_seq_len: int = 8192,
+    local_files_only: bool = False,
+) -> EngineExecutor:
+    model = Qwen3OmniTorchThinker(
+        model_id=model_id,
+        device=device,
+        dtype=dtype,
+        local_files_only=local_files_only,
+    )
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     eos_token_id = getattr(tokenizer, "eos_token_id", None)
 
