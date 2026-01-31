@@ -11,7 +11,9 @@ from sglang_omni.engines.omni.runtime import ARRequestData, EncoderRequestData
 from sglang_omni.models.qwen3_omni.io import PipelineState, ThinkerOutput
 
 
-def build_encoder_request(state: PipelineState, *, stage_name: str) -> EncoderRequestData:
+def build_encoder_request(
+    state: PipelineState, *, stage_name: str
+) -> EncoderRequestData:
     inputs = state.encoder_inputs.get(stage_name)
     if not isinstance(inputs, dict) or not inputs:
         return EncoderRequestData(input_dict={"_skip": True, "_result": {}})
@@ -76,7 +78,9 @@ def build_thinker_request(
 
     return ARRequestData(
         input_ids=input_ids.to(dtype=torch.long),
-        attention_mask=attention_mask if isinstance(attention_mask, torch.Tensor) else None,
+        attention_mask=(
+            attention_mask if isinstance(attention_mask, torch.Tensor) else None
+        ),
         model_inputs=model_inputs,
         capture_model_output_keys=tuple(capture_keys) if capture_keys else (),
         max_new_tokens=params.get("max_new_tokens"),
