@@ -126,82 +126,6 @@ def resolve_model_path(model_id: str, *, local_files_only: bool = False) -> Path
     return Path(snapshot_download(model_id, local_files_only=local_files_only))
 
 
-def _read_safetensors_keys(
-    path: Path,
-    keys: list[str],
-    *,
-    device: str = "cpu",
-    dtype: torch.dtype | None = None,
-) -> dict[str, torch.Tensor]:
-    from safetensors import safe_open
-
-    state_dict: dict[str, torch.Tensor] = {}
-    if not keys:
-        return state_dict
-    with safe_open(str(path), framework="pt", device=device) as f:
-        for key in keys:
-            tensor = f.get_tensor(key)
-            if dtype is not None and tensor.dtype != dtype:
-                tensor = tensor.to(dtype)
-            state_dict[key] = tensor
-    return state_dict
-
-
-def _load_safetensors_sharded(
-    model_path: Path,
-    prefix: str,
-    *,
-    device: str = "cpu",
-    dtype: torch.dtype | None = None,
-) -> dict[str, torch.Tensor]:
-    index_file = model_path / "model.safetensors.index.json"
-    if not index_file.exists():
-        return {}
-
-    with index_file.open("r", encoding="utf-8") as f:
-        weight_map = json.load(f)["weight_map"]
-
-    shards: dict[str, list[str]] = {}
-    for key, shard in weight_map.items():
-        if key.startswith(prefix):
-            shards.setdefault(shard, []).append(key)
-
-    state_dict: dict[str, torch.Tensor] = {}
-    for shard, keys in shards.items():
-        shard_path = model_path / shard
-        shard_weights = _read_safetensors_keys(
-            shard_path, keys, device=device, dtype=dtype
-        )
-        for key, tensor in shard_weights.items():
-            new_key = key[len(prefix) :]
-            state_dict[new_key] = tensor
-    return state_dict
-
-
-def _load_safetensors_single(
-    model_path: Path,
-    prefix: str,
-    *,
-    device: str = "cpu",
-    dtype: torch.dtype | None = None,
-) -> dict[str, torch.Tensor]:
-    single = model_path / "model.safetensors"
-    if not single.exists():
-        return {}
-
-    from safetensors import safe_open
-
-    state_dict: dict[str, torch.Tensor] = {}
-    with safe_open(str(single), framework="pt", device=device) as f:
-        for key in f.keys():
-            if key.startswith(prefix):
-                tensor = f.get_tensor(key)
-                if dtype is not None and tensor.dtype != dtype:
-                    tensor = tensor.to(dtype)
-                state_dict[key[len(prefix) :]] = tensor
-    return state_dict
-
-
 def _normalize_prefixes(prefixes: str | tuple[str, ...] | list[str]) -> tuple[str, ...]:
     if isinstance(prefixes, str):
         return (prefixes,)
@@ -383,28 +307,6 @@ def load_weights_by_prefixes(
     return state_dict
 
 
-def load_weights_by_prefix(
-    model_path: str | Path,
-    *,
-    prefix: str | tuple[str, ...] | list[str],
-) -> dict[str, torch.Tensor]:
-    """Load safetensors weights matching one of the prefixes, stripping the matched prefix."""
-    model_path = Path(model_path)
-    prefixes = _normalize_prefixes(prefix)
-
-    for prefix_item in prefixes:
-        state_dict = _load_safetensors_sharded(model_path, prefix_item)
-        if state_dict:
-            return state_dict
-        state_dict = _load_safetensors_single(model_path, prefix_item)
-        if state_dict:
-            return state_dict
-
-    raise FileNotFoundError(
-        f"No safetensors weights found for prefixes {list(prefixes)!r} under {model_path}"
-    )
-
-
 def load_module(
     module: nn.Module,
     model_path: str | Path,
@@ -415,18 +317,20 @@ def load_module(
     strict: bool = True,
 ) -> nn.Module:
     """Load weights into module by prefix, optionally move to device."""
-    state_dict = load_weights_by_prefix(
+    state_dict = load_weights_by_prefixes(
         model_path,
-        prefix=prefix,
+        prefixes=prefix,
+        device=str(device) if device is not None else "cpu",
+        dtype=dtype,
     )
     state_dict = _maybe_fuse_qwen3_moe_experts(state_dict, module)
     module.load_state_dict(state_dict, strict=strict, assign=True)
     module.eval()
-    if device is not None or dtype is not None:
-        if device is not None and dtype is not None:
-            module = module.to(device=device, dtype=dtype)
-        elif device is not None:
-            module = module.to(device=device)
-        else:
-            module = module.to(dtype=dtype)
+    move_kwargs = {}
+    if device is not None:
+        move_kwargs["device"] = device
+    if dtype is not None:
+        move_kwargs["dtype"] = dtype
+    if move_kwargs:
+        module = module.to(**move_kwargs)
     return module

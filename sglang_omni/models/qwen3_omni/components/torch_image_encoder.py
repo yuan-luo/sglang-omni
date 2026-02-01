@@ -10,7 +10,7 @@ from sglang_omni.models.qwen3_omni.components.torch_common import load_config_di
 from sglang_omni.models.qwen3_omni.modeling import Qwen3OmniVisionEncoder as TorchVision
 from sglang_omni.models.weight_loader import load_weights_by_prefixes, resolve_dtype
 
-VISUAL_PREFIX = ("thinker.visual.", "visual.")
+VISUAL_PREFIX = ("thinker.visual.",)
 
 
 class Qwen3OmniTorchImageEncoder(nn.Module):

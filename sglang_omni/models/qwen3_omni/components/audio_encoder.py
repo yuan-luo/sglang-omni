@@ -11,7 +11,7 @@ from sglang_omni.models.qwen3_omni.components.common import load_thinker_config
 from sglang_omni.models.utils.hf import instantiate_module
 from sglang_omni.models.weight_loader import load_module, resolve_dtype
 
-AUDIO_TOWER_PREFIX = ("thinker.audio_tower.", "audio_tower.")
+AUDIO_TOWER_PREFIX = "thinker.audio_tower."
 AUDIO_TOWER_CLASS = hf_modeling.Qwen3OmniMoeAudioEncoder
 
 

@@ -10,26 +10,13 @@ import torch.nn as nn
 from accelerate import init_empty_weights
 from transformers.models.qwen3_omni_moe import modeling_qwen3_omni_moe as hf_modeling
 
-from sglang_omni.models.qwen3_omni.components.common import load_thinker_config
+from sglang_omni.models.qwen3_omni.components.common import concat_features, load_thinker_config
 from sglang_omni.models.utils.hf import instantiate_module
 from sglang_omni.models.weight_loader import load_module, resolve_dtype
 
-TEXT_MODEL_PREFIX = ("thinker.model.", "model.")
-LM_HEAD_PREFIX = ("thinker.lm_head.", "lm_head.")
+TEXT_MODEL_PREFIX = "thinker.model."
+LM_HEAD_PREFIX = "thinker.lm_head."
 TEXT_MODEL_CLASS = hf_modeling.Qwen3OmniMoeThinkerTextModel
-
-
-def _concat_features(value: Any) -> torch.Tensor | None:
-    if value is None:
-        return None
-    if isinstance(value, torch.Tensor):
-        return value
-    if isinstance(value, (list, tuple)):
-        tensors = [v for v in value if isinstance(v, torch.Tensor)]
-        if not tensors:
-            return None
-        return torch.cat(tensors, dim=0)
-    return None
 
 
 def _should_tie_embeddings(config: Any) -> bool:
@@ -143,19 +130,16 @@ class Qwen3OmniSplitThinker(nn.Module):
         dtype = kwargs.get("dtype")
         if device is None and args:
             device = args[0]
-
         if device is not None:
             self._device = torch.device(device)
-
-        if device is not None and dtype is not None:
-            self.thinker.model = self.thinker.model.to(device=device, dtype=dtype)
-            self.thinker.lm_head = self.thinker.lm_head.to(device=device, dtype=dtype)
-        elif device is not None:
-            self.thinker.model = self.thinker.model.to(device=device)
-            self.thinker.lm_head = self.thinker.lm_head.to(device=device)
-        elif dtype is not None:
-            self.thinker.model = self.thinker.model.to(dtype=dtype)
-            self.thinker.lm_head = self.thinker.lm_head.to(dtype=dtype)
+        move_kwargs = {}
+        if device is not None:
+            move_kwargs["device"] = device
+        if dtype is not None:
+            move_kwargs["dtype"] = dtype
+        if move_kwargs:
+            self.thinker.model = self.thinker.model.to(**move_kwargs)
+            self.thinker.lm_head = self.thinker.lm_head.to(**move_kwargs)
         return self
 
     def _merge_embeddings(
@@ -206,8 +190,8 @@ class Qwen3OmniSplitThinker(nn.Module):
         audio_embeds: torch.Tensor | list[torch.Tensor] | None = None,
         **kwargs: Any,
     ):
-        image_embeds_t = _concat_features(image_embeds)
-        audio_embeds_t = _concat_features(audio_embeds)
+        image_embeds_t = concat_features(image_embeds)
+        audio_embeds_t = concat_features(audio_embeds)
         deepstack_visual_embeds = kwargs.pop("deepstack_visual_embeds", None)
         visual_pos_masks = kwargs.pop("visual_pos_masks", None)
 

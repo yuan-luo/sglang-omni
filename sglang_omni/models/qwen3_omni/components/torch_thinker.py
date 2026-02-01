@@ -8,6 +8,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from sglang_omni.models.qwen3_omni.components.common import concat_features
 from sglang_omni.models.qwen3_omni.components.torch_common import (
     load_config_dict,
     strip_audio_config,
@@ -19,19 +20,6 @@ from sglang_omni.models.qwen3_omni.modeling import (
     _maybe_apply_causal_mask,
 )
 from sglang_omni.models.weight_loader import load_weights_by_prefixes, resolve_dtype
-
-
-def _concat_features(value: Any) -> torch.Tensor | None:
-    if value is None:
-        return None
-    if isinstance(value, torch.Tensor):
-        return value
-    if isinstance(value, (list, tuple)):
-        tensors = [v for v in value if isinstance(v, torch.Tensor)]
-        if not tensors:
-            return None
-        return torch.cat(tensors, dim=0)
-    return None
 
 
 def _get_feat_extract_output_lengths(input_lengths: torch.Tensor) -> torch.Tensor:
@@ -466,8 +454,8 @@ class Qwen3OmniTorchThinker(nn.Module):
         if attention_mask is not None and attention_mask.dim() == 1:
             attention_mask = attention_mask.unsqueeze(0)
 
-        image_embeds_t = _concat_features(image_embeds)
-        audio_embeds_t = _concat_features(audio_embeds)
+        image_embeds_t = concat_features(image_embeds)
+        audio_embeds_t = concat_features(audio_embeds)
 
         if inputs_embeds is None:
             if input_ids is None:

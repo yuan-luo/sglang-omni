@@ -6,7 +6,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import torch
+
 from sglang_omni.models.utils.hf import load_hf_config
+
+
+def concat_features(value: Any) -> torch.Tensor | None:
+    """Concatenate a list/tuple of tensors or pass through a single tensor."""
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        return value
+    if isinstance(value, (list, tuple)):
+        tensors = [v for v in value if isinstance(v, torch.Tensor)]
+        if not tensors:
+            return None
+        return torch.cat(tensors, dim=0)
+    return None
 
 
 def load_thinker_config(model_path: str) -> Any:

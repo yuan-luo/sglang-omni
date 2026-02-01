@@ -11,7 +11,7 @@ from sglang_omni.models.qwen3_omni.components.common import load_thinker_config
 from sglang_omni.models.utils.hf import instantiate_module
 from sglang_omni.models.weight_loader import load_module, resolve_dtype
 
-VISUAL_PREFIX = ("thinker.visual.", "visual.")
+VISUAL_PREFIX = "thinker.visual."
 VISUAL_CLASS = hf_modeling.Qwen3OmniMoeVisionEncoder
 
 
@@ -65,12 +65,8 @@ class Qwen3OmniImageEncoder(nn.Module):
         image_grid_thw = image_grid_thw.to(self._device, dtype=torch.long)
         pixel_values = pixel_values.to(device=self._device, dtype=self.visual.dtype)
         output = self.visual(pixel_values, grid_thw=image_grid_thw)
-        if isinstance(output, tuple):
-            image_embeds, image_embeds_multiscale = output
-        else:
-            # transformers >= 5.0 returns BaseModelOutputWithDeepstackFeatures
-            image_embeds = output.pooler_output
-            image_embeds_multiscale = output.deepstack_features
+        image_embeds = output.pooler_output
+        image_embeds_multiscale = output.deepstack_features
         merge = self.spatial_merge_size**2
         image_token_counts = image_grid_thw.prod(-1) // merge
         return {
