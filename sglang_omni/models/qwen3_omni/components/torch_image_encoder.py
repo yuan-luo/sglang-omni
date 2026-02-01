@@ -8,7 +8,7 @@ import torch.nn as nn
 
 from sglang_omni.models.qwen3_omni.components.torch_common import load_config_dict
 from sglang_omni.models.qwen3_omni.modeling import Qwen3OmniVisionEncoder as TorchVision
-from sglang_omni.models.weight_loader import load_weights_by_prefix, resolve_dtype
+from sglang_omni.models.weight_loader import load_weights_by_prefixes, resolve_dtype
 
 VISUAL_PREFIX = ("thinker.visual.", "visual.")
 
@@ -36,9 +36,9 @@ class Qwen3OmniTorchImageEncoder(nn.Module):
         self.visual = self.visual.to(self._device)
         self.visual.eval()
 
-        state_dict = load_weights_by_prefix(
+        state_dict = load_weights_by_prefixes(
             model_path,
-            prefix=VISUAL_PREFIX,
+            prefixes=VISUAL_PREFIX,
         )
         self.visual.load_state_dict(state_dict, strict=True)
         self.spatial_merge_size = int(vision_cfg.get("spatial_merge_size", 1))

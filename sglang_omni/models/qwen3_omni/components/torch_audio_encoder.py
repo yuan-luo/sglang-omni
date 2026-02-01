@@ -8,7 +8,7 @@ import torch.nn as nn
 
 from sglang_omni.models.qwen3_omni.components.torch_common import load_config_dict
 from sglang_omni.models.qwen3_omni.modeling import Qwen3OmniAudioEncoder as TorchAudio
-from sglang_omni.models.weight_loader import load_weights_by_prefix, resolve_dtype
+from sglang_omni.models.weight_loader import load_weights_by_prefixes, resolve_dtype
 
 
 class Qwen3OmniTorchAudioEncoder(nn.Module):
@@ -25,15 +25,17 @@ class Qwen3OmniTorchAudioEncoder(nn.Module):
         self._device = torch.device(device)
         torch_dtype = resolve_dtype(dtype)
         config = load_config_dict(model_path)
-        self.audio_tower = TorchAudio(config)
+        thinker_cfg = config.get("thinker_config", config)
+        audio_cfg = thinker_cfg.get("audio_config", thinker_cfg)
+        self.audio_tower = TorchAudio(audio_cfg)
         if torch_dtype is not None:
             self.audio_tower = self.audio_tower.to(dtype=torch_dtype)
         self.audio_tower = self.audio_tower.to(self._device)
         self.audio_tower.eval()
 
-        state_dict = load_weights_by_prefix(
+        state_dict = load_weights_by_prefixes(
             model_path,
-            prefix=("thinker.audio_tower.", "audio_tower."),
+            prefixes=("thinker.audio_tower.",),
         )
         self.audio_tower.load_state_dict(state_dict, strict=True)
 
@@ -44,17 +46,27 @@ class Qwen3OmniTorchAudioEncoder(nn.Module):
         feature_attention_mask: torch.Tensor | None = None,
         audio_feature_lengths: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        if feature_attention_mask is not None:
-            audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
-            input_features = (
-                input_features.permute(0, 2, 1)[feature_attention_mask.bool()]
-                .permute(1, 0)
-                .contiguous()
-            )
         if audio_feature_lengths is None:
-            raise ValueError(
-                "audio_feature_lengths or feature_attention_mask is required"
-            )
+            if (
+                feature_attention_mask is not None
+                and feature_attention_mask.shape[-1] == input_features.shape[-1]
+            ):
+                audio_feature_lengths = torch.sum(
+                    feature_attention_mask, dim=1
+                ).to(dtype=torch.long)
+            else:
+                audio_feature_lengths = torch.full(
+                    (input_features.shape[0],),
+                    input_features.shape[-1],
+                    device=input_features.device,
+                    dtype=torch.long,
+                )
+
+        if input_features.dim() == 3:
+            flat_chunks = []
+            for i, length in enumerate(audio_feature_lengths.tolist()):
+                flat_chunks.append(input_features[i, :, :length])
+            input_features = torch.cat(flat_chunks, dim=1).contiguous()
 
         audio_feature_lengths = audio_feature_lengths.to(self._device, dtype=torch.long)
         input_features = input_features.to(self._device, dtype=self.audio_tower.conv_out.weight.dtype)

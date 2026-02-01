@@ -18,8 +18,7 @@ from sglang_omni.models.qwen3_omni.modeling import (
     _build_position_ids,
     _maybe_apply_causal_mask,
 )
-from sglang_omni.models.weight_loader import resolve_dtype
-from sglang_omni.models.weight_utils import weights_iterator
+from sglang_omni.models.weight_loader import load_weights_by_prefixes, resolve_dtype
 
 
 def _concat_features(value: Any) -> torch.Tensor | None:
@@ -76,8 +75,17 @@ class Qwen3OmniTorchThinker(nn.Module):
         self.spatial_merge_size = int(vision_cfg.get("spatial_merge_size", 1))
         self._rope_deltas: torch.Tensor | None = None
 
-        # Load weights from checkpoint
-        self.thinker.load_weights(weights_iterator(model_path))
+        # Load only thinker + lm_head weights (skip talker/code2wav/audio/vision)
+        state_dict = load_weights_by_prefixes(
+            model_path,
+            prefixes="thinker.model.",
+        )
+        lm_head_dict = load_weights_by_prefixes(
+            model_path,
+            prefixes="thinker.lm_head.",
+        )
+        state_dict.update({f"lm_head.{k}": v for k, v in lm_head_dict.items()})
+        self.thinker.load_state_dict(state_dict, strict=True)
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.thinker.get_input_embeddings()

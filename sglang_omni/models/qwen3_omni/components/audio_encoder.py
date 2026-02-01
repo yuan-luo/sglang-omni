@@ -63,17 +63,27 @@ class Qwen3OmniAudioEncoder(nn.Module):
         feature_attention_mask: torch.Tensor | None = None,
         audio_feature_lengths: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        if feature_attention_mask is not None:
-            audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
-            input_features = (
-                input_features.permute(0, 2, 1)[feature_attention_mask.bool()]
-                .permute(1, 0)
-                .contiguous()
-            )
         if audio_feature_lengths is None:
-            raise ValueError(
-                "audio_feature_lengths or feature_attention_mask is required"
-            )
+            if (
+                feature_attention_mask is not None
+                and feature_attention_mask.shape[-1] == input_features.shape[-1]
+            ):
+                audio_feature_lengths = torch.sum(
+                    feature_attention_mask, dim=1
+                ).to(dtype=torch.long)
+            else:
+                audio_feature_lengths = torch.full(
+                    (input_features.shape[0],),
+                    input_features.shape[-1],
+                    device=input_features.device,
+                    dtype=torch.long,
+                )
+
+        if input_features.dim() == 3:
+            flat_chunks = []
+            for i, length in enumerate(audio_feature_lengths.tolist()):
+                flat_chunks.append(input_features[i, :, :length])
+            input_features = torch.cat(flat_chunks, dim=1).contiguous()
 
         audio_feature_lengths = audio_feature_lengths.to(self._device, dtype=torch.long)
         outputs = self.audio_tower(

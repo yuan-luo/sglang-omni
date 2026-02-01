@@ -3,19 +3,13 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import torch
 from transformers import AutoFeatureExtractor, AutoImageProcessor, AutoTokenizer
 from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
     Qwen3OmniMoeProcessor,
 )
-try:
-    from transformers.video_processing_utils import BaseVideoProcessor
-except Exception:  # pragma: no cover - environment-dependent
-    from transformers.utils.dummy_torchvision_objects import BaseVideoProcessor
 
 from sglang_omni.frontends import (
     build_audio_mm_inputs,
@@ -30,79 +24,16 @@ from sglang_omni.frontends import (
 from sglang_omni.models.qwen3_omni.io import PipelineState
 from sglang_omni.proto import StagePayload
 
-
-def _load_preprocessor_config(model_dir: str) -> Mapping[str, Any]:
-    cfg_path = Path(model_dir) / "preprocessor_config.json"
-    with open(cfg_path, encoding="utf-8") as f:
-        payload = json.load(f)
-    if not isinstance(payload, Mapping):
-        raise ValueError("preprocessor_config.json is not a mapping")
-    return payload
-
-
-class _StubVideoProcessor(BaseVideoProcessor):
-    """Minimal video processor to avoid remote downloads when video is unused."""
-
-    def __init__(self, *, merge_size: int, temporal_patch_size: int):
-        super().__init__(merge_size=merge_size, temporal_patch_size=temporal_patch_size)
-
-    def preprocess(
-        self, *args: Any, **kwargs: Any
-    ) -> Any:  # pragma: no cover - defensive
-        raise NotImplementedError("Video inputs are not supported in this pipeline yet")
-
-
-def _build_processor_local(model_dir: str) -> Qwen3OmniMoeProcessor:
-    cfg = _load_preprocessor_config(model_dir)
-    merge_size = int(cfg.get("merge_size", 2))
-    temporal_patch_size = int(cfg.get("temporal_patch_size", 2))
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_dir,
-        trust_remote_code=True,
-        local_files_only=True,
-    )
-    ensure_chat_template(tokenizer, model_id=model_dir)
-
-    image_processor = AutoImageProcessor.from_pretrained(
-        model_dir,
-        trust_remote_code=True,
-        local_files_only=True,
-    )
-    feature_extractor = AutoFeatureExtractor.from_pretrained(
-        model_dir,
-        trust_remote_code=True,
-        local_files_only=True,
-    )
-    video_processor = _StubVideoProcessor(
-        merge_size=merge_size,
-        temporal_patch_size=temporal_patch_size,
-    )
-    processor = Qwen3OmniMoeProcessor(
-        image_processor=image_processor,
-        video_processor=video_processor,
-        feature_extractor=feature_extractor,
-        tokenizer=tokenizer,
-    )
-    ensure_chat_template(processor.tokenizer, model_id=model_dir)
-    return processor
-
-
 class Qwen3OmniFrontend:
     """CPU-side preprocessing and tokenization using the HF processor."""
 
     def __init__(self, model_path: str):
         self.model_dir = model_path
-        try:
-            self.processor = Qwen3OmniMoeProcessor.from_pretrained(
-                self.model_dir,
-                trust_remote_code=True,
-                local_files_only=True,
-            )
-        except Exception:
-            # The hub cache may not include video_preprocessor_config.json.
-            # Build the processor locally with a stub video processor instead.
-            self.processor = _build_processor_local(self.model_dir)
+        self.processor = Qwen3OmniMoeProcessor.from_pretrained(
+            self.model_dir,
+            trust_remote_code=True,
+            local_files_only=True,
+        )
         self.tokenizer = self.processor.tokenizer
         ensure_chat_template(self.tokenizer, model_id=self.model_dir)
 

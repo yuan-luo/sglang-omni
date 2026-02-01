@@ -104,6 +104,64 @@ def _normalize_prefixes(prefixes: str | tuple[str, ...] | list[str]) -> tuple[st
     return tuple(prefixes)
 
 
+def load_weights_by_prefixes(
+    model_path: str | Path,
+    *,
+    prefixes: str | tuple[str, ...] | list[str],
+) -> dict[str, torch.Tensor]:
+    """Load safetensors weights matching any prefix, stripping the matched prefix."""
+    from safetensors import safe_open
+
+    model_path = Path(model_path)
+    prefixes = _normalize_prefixes(prefixes)
+    index_file = model_path / "model.safetensors.index.json"
+
+    if index_file.exists():
+        with index_file.open("r", encoding="utf-8") as f:
+            weight_map = json.load(f)["weight_map"]
+
+        shards: dict[str, list[tuple[str, str]]] = {}
+        for key, shard in weight_map.items():
+            for prefix in prefixes:
+                if key.startswith(prefix):
+                    new_key = key[len(prefix) :]
+                    shards.setdefault(shard, []).append((key, new_key))
+                    break
+
+        if not shards:
+            raise FileNotFoundError(
+                f"No safetensors weights found for prefixes {list(prefixes)!r} under {model_path}"
+            )
+
+        state_dict: dict[str, torch.Tensor] = {}
+        for shard, entries in shards.items():
+            shard_path = model_path / shard
+            with safe_open(str(shard_path), framework="pt", device="cpu") as f:
+                for original_key, new_key in entries:
+                    state_dict[new_key] = f.get_tensor(original_key)
+        return state_dict
+
+    single = model_path / "model.safetensors"
+    if not single.exists():
+        raise FileNotFoundError(
+            f"No safetensors weights found for prefixes {list(prefixes)!r} under {model_path}"
+        )
+
+    state_dict: dict[str, torch.Tensor] = {}
+    with safe_open(str(single), framework="pt", device="cpu") as f:
+        for key in f.keys():
+            for prefix in prefixes:
+                if key.startswith(prefix):
+                    state_dict[key[len(prefix) :]] = f.get_tensor(key)
+                    break
+
+    if not state_dict:
+        raise FileNotFoundError(
+            f"No safetensors weights found for prefixes {list(prefixes)!r} under {model_path}"
+        )
+    return state_dict
+
+
 def load_weights_by_prefix(
     model_path: str | Path,
     *,
