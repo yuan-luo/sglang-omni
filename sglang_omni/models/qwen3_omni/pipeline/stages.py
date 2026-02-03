@@ -21,10 +21,7 @@ from sglang_omni.models.qwen3_omni.components.torch_image_encoder import (
     VISUAL_PREFIX,
     Qwen3OmniTorchImageEncoder,
 )
-from sglang_omni.models.qwen3_omni.components.torch_thinker import (
-    Qwen3OmniTorchThinker,
-)
-from sglang_omni.models.weight_loader import preload_weights, resolve_dtype
+from sglang_omni.models.qwen3_omni.components.torch_thinker import Qwen3OmniTorchThinker
 from sglang_omni.models.qwen3_omni.io import OmniEvent, ThinkerOutput
 from sglang_omni.models.qwen3_omni.pipeline.engine_io import (
     apply_encoder_result,
@@ -39,6 +36,7 @@ from sglang_omni.models.qwen3_omni.pipeline.next_stage import (
     THINKER_STAGE,
 )
 from sglang_omni.models.qwen3_omni.pipeline.state_io import load_state, store_state
+from sglang_omni.models.weight_loader import preload_weights, resolve_dtype
 from sglang_omni.proto import StagePayload
 
 
@@ -51,9 +49,7 @@ def _event_to_dict(event: OmniEvent) -> dict[str, Any]:
     }
 
 
-def create_frontend_executor(
-    model_path: str
-) -> FrontendExecutor:
+def create_frontend_executor(model_path: str) -> FrontendExecutor:
     frontend = Qwen3OmniFrontend(model_path=model_path)
 
     def _frontend(payload: StagePayload) -> StagePayload:

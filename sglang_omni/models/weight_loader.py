@@ -69,7 +69,11 @@ def _maybe_fuse_qwen3_moe_experts(
             gate_key = f"{prefix}.{idx}.gate_proj.weight"
             up_key = f"{prefix}.{idx}.up_proj.weight"
             down_key_per = f"{prefix}.{idx}.down_proj.weight"
-            if gate_key not in state_dict or up_key not in state_dict or down_key_per not in state_dict:
+            if (
+                gate_key not in state_dict
+                or up_key not in state_dict
+                or down_key_per not in state_dict
+            ):
                 missing = True
                 break
             gate = state_dict[gate_key]
@@ -90,6 +94,7 @@ def _maybe_fuse_qwen3_moe_experts(
             state_dict.pop(f"{prefix}.{idx}.down_proj.weight", None)
 
     return state_dict
+
 
 def resolve_dtype(dtype: str | torch.dtype | None) -> torch.dtype | None:
     if isinstance(dtype, torch.dtype):
@@ -168,9 +173,7 @@ def preload_weights(
                 f"No safetensors weights found for prefixes {groups!r} under {model_path}"
             )
 
-        group_dicts: list[dict[str, torch.Tensor]] = [
-            {} for _ in range(len(groups))
-        ]
+        group_dicts: list[dict[str, torch.Tensor]] = [{} for _ in range(len(groups))]
 
         def _load_shard(shard: str, entries: list[tuple[int, str, str]]):
             shard_path = model_path / shard
@@ -236,6 +239,7 @@ def preload_weights(
             )
         cache_key = (str(model_path), device, str(dtype), prefixes)
         _WEIGHT_CACHE[cache_key] = group_dicts[idx]
+
 
 def load_weights_by_prefixes(
     model_path: str | Path,

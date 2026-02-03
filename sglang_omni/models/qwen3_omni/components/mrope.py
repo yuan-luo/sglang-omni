@@ -86,7 +86,11 @@ def get_multimodal_rope_index(
             if vision_start_token_id is not None
             else torch.tensor([], device=batch_ids.device, dtype=torch.long)
         )
-        vision_tokens = batch_ids[vision_start_indices + 1] if vision_start_indices.numel() else batch_ids[:0]
+        vision_tokens = (
+            batch_ids[vision_start_indices + 1]
+            if vision_start_indices.numel()
+            else batch_ids[:0]
+        )
         audio_nums = (
             torch.sum(batch_ids == int(audio_start_token_id))
             if audio_start_token_id is not None
@@ -134,7 +138,11 @@ def get_multimodal_rope_index(
             else:
                 ed_vision_start = len(input_tokens) + 1
 
-            if audio_token_id in input_tokens and remain_audios > 0 and audio_start_token_id is not None:
+            if (
+                audio_token_id in input_tokens
+                and remain_audios > 0
+                and audio_start_token_id is not None
+            ):
                 ed_audio_start = input_tokens.index(int(audio_start_token_id), st)
             else:
                 ed_audio_start = len(input_tokens) + 1
@@ -143,7 +151,9 @@ def get_multimodal_rope_index(
             text_len = min_ed - st
             if text_len:
                 llm_pos_ids_list.append(
-                    torch.arange(text_len, device=input_ids.device).view(1, -1).expand(3, -1)
+                    torch.arange(text_len, device=input_ids.device)
+                    .view(1, -1)
+                    .expand(3, -1)
                     + st_idx
                 )
                 st_idx += text_len
@@ -154,17 +164,23 @@ def get_multimodal_rope_index(
                 bos_len, eos_len = 1, 1
 
             llm_pos_ids_list.append(
-                torch.arange(bos_len, device=input_ids.device).view(1, -1).expand(3, -1) + st_idx
+                torch.arange(bos_len, device=input_ids.device).view(1, -1).expand(3, -1)
+                + st_idx
             )
             st_idx += bos_len
 
             # Audio only
             if min_ed == ed_audio_start:
                 if audio_seqlens is None:
-                    raise ValueError("audio_feature_lengths is required for audio rope index")
+                    raise ValueError(
+                        "audio_feature_lengths is required for audio rope index"
+                    )
                 audio_len = get_feat_extract_output_lengths(audio_seqlens[audio_idx])
                 llm_pos_ids = (
-                    torch.arange(audio_len, device=input_ids.device).view(1, -1).expand(3, -1) + st_idx
+                    torch.arange(audio_len, device=input_ids.device)
+                    .view(1, -1)
+                    .expand(3, -1)
+                    + st_idx
                 )
                 llm_pos_ids_list.append(llm_pos_ids)
 
@@ -173,17 +189,18 @@ def get_multimodal_rope_index(
                 remain_audios -= 1
 
             # Image only
-            elif min_ed == ed_vision_start and image_token_id is not None and batch_ids[ed_vision_start + 1] == int(
-                image_token_id
+            elif (
+                min_ed == ed_vision_start
+                and image_token_id is not None
+                and batch_ids[ed_vision_start + 1] == int(image_token_id)
             ):
                 if image_grid_thw is None:
                     raise ValueError("image_grid_thw is required for image rope index")
                 grid_t = image_grid_thw[image_idx][0]
                 grid_hs = image_grid_thw[:, 1]
                 grid_ws = image_grid_thw[:, 2]
-                t_index = (
-                    torch.arange(grid_t, device=input_ids.device).float()
-                    * float(position_id_per_seconds)
+                t_index = torch.arange(grid_t, device=input_ids.device).float() * float(
+                    position_id_per_seconds
                 )
                 llm_pos_ids = get_llm_pos_ids_for_vision(
                     st_idx, image_idx, spatial_merge_size, t_index, grid_hs, grid_ws
@@ -196,8 +213,10 @@ def get_multimodal_rope_index(
                 remain_images -= 1
 
             # Video only
-            elif min_ed == ed_vision_start and video_token_id is not None and batch_ids[ed_vision_start + 1] == int(
-                video_token_id
+            elif (
+                min_ed == ed_vision_start
+                and video_token_id is not None
+                and batch_ids[ed_vision_start + 1] == int(video_token_id)
             ):
                 if video_grid_thw is None:
                     raise ValueError("video_grid_thw is required for video rope index")
@@ -205,7 +224,9 @@ def get_multimodal_rope_index(
                 grid_hs = video_grid_thw[:, 1]
                 grid_ws = video_grid_thw[:, 2]
                 if second_per_grids is None:
-                    raise ValueError("video_second_per_grid is required for video rope index")
+                    raise ValueError(
+                        "video_second_per_grid is required for video rope index"
+                    )
                 t_index = (
                     torch.arange(grid_t, device=input_ids.device).float()
                     * float(second_per_grids[video_idx].cpu().float())
@@ -223,11 +244,20 @@ def get_multimodal_rope_index(
 
             # Audio in video
             elif min_ed == ed_vision_start and ed_vision_start + 1 == ed_audio_start:
-                if audio_seqlens is None or video_grid_thw is None or second_per_grids is None:
-                    raise ValueError("audio + video inputs required for audio-in-video rope index")
+                if (
+                    audio_seqlens is None
+                    or video_grid_thw is None
+                    or second_per_grids is None
+                ):
+                    raise ValueError(
+                        "audio + video inputs required for audio-in-video rope index"
+                    )
                 audio_len = get_feat_extract_output_lengths(audio_seqlens[audio_idx])
                 audio_llm_pos_ids = (
-                    torch.arange(audio_len, device=input_ids.device).view(1, -1).expand(3, -1) + st_idx
+                    torch.arange(audio_len, device=input_ids.device)
+                    .view(1, -1)
+                    .expand(3, -1)
+                    + st_idx
                 )
                 grid_t = video_grid_thw[video_idx][0]
                 grid_hs = video_grid_thw[:, 1]
@@ -246,23 +276,34 @@ def get_multimodal_rope_index(
                     video_data_index < video_llm_pos_ids.shape[-1]
                     and audio_data_index < audio_llm_pos_ids.shape[-1]
                 ):
-                    if video_llm_pos_ids[0][video_data_index] <= audio_llm_pos_ids[0][audio_data_index]:
+                    if (
+                        video_llm_pos_ids[0][video_data_index]
+                        <= audio_llm_pos_ids[0][audio_data_index]
+                    ):
                         llm_pos_ids_list.append(
-                            video_llm_pos_ids[:, video_data_index : video_data_index + 1]
+                            video_llm_pos_ids[
+                                :, video_data_index : video_data_index + 1
+                            ]
                         )
                         video_data_index += 1
                     else:
                         llm_pos_ids_list.append(
-                            audio_llm_pos_ids[:, audio_data_index : audio_data_index + 1]
+                            audio_llm_pos_ids[
+                                :, audio_data_index : audio_data_index + 1
+                            ]
                         )
                         audio_data_index += 1
                 if video_data_index < video_llm_pos_ids.shape[-1]:
                     llm_pos_ids_list.append(
-                        video_llm_pos_ids[:, video_data_index : video_llm_pos_ids.shape[-1]]
+                        video_llm_pos_ids[
+                            :, video_data_index : video_llm_pos_ids.shape[-1]
+                        ]
                     )
                 if audio_data_index < audio_llm_pos_ids.shape[-1]:
                     llm_pos_ids_list.append(
-                        audio_llm_pos_ids[:, audio_data_index : audio_llm_pos_ids.shape[-1]]
+                        audio_llm_pos_ids[
+                            :, audio_data_index : audio_llm_pos_ids.shape[-1]
+                        ]
                     )
 
                 video_len = video_grid_thw[video_idx].prod() // (spatial_merge_size**2)
@@ -274,20 +315,26 @@ def get_multimodal_rope_index(
 
             st_idx = llm_pos_ids_list[-1].max() + 1 if llm_pos_ids_list else 0
             llm_pos_ids_list.append(
-                torch.arange(eos_len, device=input_ids.device).view(1, -1).expand(3, -1) + st_idx
+                torch.arange(eos_len, device=input_ids.device).view(1, -1).expand(3, -1)
+                + st_idx
             )
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if llm_pos_ids_list else 0
             text_len = len(input_tokens) - st
             llm_pos_ids_list.append(
-                torch.arange(text_len, device=input_ids.device).view(1, -1).expand(3, -1) + st_idx
+                torch.arange(text_len, device=input_ids.device)
+                .view(1, -1)
+                .expand(3, -1)
+                + st_idx
             )
 
-        llm_positions = torch.cat([item.float() for item in llm_pos_ids_list], dim=1).reshape(3, -1)
+        llm_positions = torch.cat(
+            [item.float() for item in llm_pos_ids_list], dim=1
+        ).reshape(3, -1)
         if attention_mask is not None:
-            position_ids[..., batch_idx, attention_mask[batch_idx] == 1] = llm_positions.to(
-                position_ids.device
+            position_ids[..., batch_idx, attention_mask[batch_idx] == 1] = (
+                llm_positions.to(position_ids.device)
             )
         else:
             position_ids[..., batch_idx, :] = llm_positions.to(position_ids.device)

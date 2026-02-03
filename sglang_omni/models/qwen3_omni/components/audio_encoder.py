@@ -68,9 +68,9 @@ class Qwen3OmniAudioEncoder(nn.Module):
                 feature_attention_mask is not None
                 and feature_attention_mask.shape[-1] == input_features.shape[-1]
             ):
-                audio_feature_lengths = torch.sum(
-                    feature_attention_mask, dim=1
-                ).to(dtype=torch.long)
+                audio_feature_lengths = torch.sum(feature_attention_mask, dim=1).to(
+                    dtype=torch.long
+                )
             else:
                 audio_feature_lengths = torch.full(
                     (input_features.shape[0],),

@@ -62,7 +62,7 @@ def filter_weights(
     for name, tensor in weights:
         if name.startswith(prefix):
             if remove_prefix:
-                name = name[len(prefix):]
+                name = name[len(prefix) :]
             yield name, tensor
 
 
@@ -74,9 +74,9 @@ def default_weight_loader(
     if param.numel() == 1 and loaded_weight.numel() == 1:
         param.data.fill_(loaded_weight.item())
     else:
-        assert param.size() == loaded_weight.size(), (
-            f"Parameter size mismatch: {param.size()} vs {loaded_weight.size()}"
-        )
+        assert (
+            param.size() == loaded_weight.size()
+        ), f"Parameter size mismatch: {param.size()} vs {loaded_weight.size()}"
         param.data.copy_(loaded_weight)
 
 

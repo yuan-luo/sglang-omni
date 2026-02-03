@@ -7,8 +7,8 @@ from functools import lru_cache
 from typing import Any
 
 import torch.nn as nn
-from transformers import AutoConfig
 from accelerate import init_empty_weights as no_init_weights
+from transformers import AutoConfig
 
 
 @lru_cache(maxsize=8)

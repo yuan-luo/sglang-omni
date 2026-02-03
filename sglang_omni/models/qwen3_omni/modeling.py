@@ -4,17 +4,17 @@
 from __future__ import annotations
 
 import logging
+import math
+import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-import math
-import re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from sglang_omni.models.weight_utils import default_weight_loader
 from sglang_omni.models.utils.sampling import sample_top_k_top_p
+from sglang_omni.models.weight_utils import default_weight_loader
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ from .modules import (
 )
 
 _EXPERT_RE = re.compile(
-    r'(.*\.mlp\.experts)\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight'
+    r"(.*\.mlp\.experts)\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight"
 )
 
 
@@ -151,30 +151,42 @@ class Qwen3OmniAudioEncoder(nn.Module):
         )
 
         self.conv2d1 = nn.Conv2d(1, self.downsample_hidden_size, 3, 2, padding=1)
-        self.conv2d2 = nn.Conv2d(self.downsample_hidden_size, self.downsample_hidden_size, 3, 2, padding=1)
-        self.conv2d3 = nn.Conv2d(self.downsample_hidden_size, self.downsample_hidden_size, 3, 2, padding=1)
+        self.conv2d2 = nn.Conv2d(
+            self.downsample_hidden_size, self.downsample_hidden_size, 3, 2, padding=1
+        )
+        self.conv2d3 = nn.Conv2d(
+            self.downsample_hidden_size, self.downsample_hidden_size, 3, 2, padding=1
+        )
 
-        conv_out_dim = self.downsample_hidden_size * ((((self.num_mel_bins + 1) // 2 + 1) // 2 + 1) // 2)
+        conv_out_dim = self.downsample_hidden_size * (
+            (((self.num_mel_bins + 1) // 2 + 1) // 2 + 1) // 2
+        )
         self.conv_out = nn.Linear(conv_out_dim, self.d_model, bias=False)
 
-        self.layers = nn.ModuleList([
-            AudioEncoderLayer(
-                d_model=self.d_model,
-                encoder_attention_heads=self.encoder_attention_heads,
-                encoder_ffn_dim=self.encoder_ffn_dim,
-            )
-            for _ in range(self.encoder_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                AudioEncoderLayer(
+                    d_model=self.d_model,
+                    encoder_attention_heads=self.encoder_attention_heads,
+                    encoder_ffn_dim=self.encoder_ffn_dim,
+                )
+                for _ in range(self.encoder_layers)
+            ]
+        )
 
         self.ln_post = nn.LayerNorm(self.d_model)
         self.proj1 = nn.Linear(self.d_model, self.d_model)
         self.act = nn.GELU()
         self.proj2 = nn.Linear(self.d_model, self.output_dim)
 
-    def _get_feat_extract_output_lengths(self, input_lengths: torch.Tensor) -> torch.Tensor:
+    def _get_feat_extract_output_lengths(
+        self, input_lengths: torch.Tensor
+    ) -> torch.Tensor:
         input_lengths_leave = input_lengths % 100
         feat_lengths = (input_lengths_leave - 1) // 2 + 1
-        output_lengths = ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
+        output_lengths = (
+            ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
+        )
         return output_lengths
 
     def _build_chunk_lengths(self, feature_lens: torch.Tensor) -> torch.Tensor:
@@ -197,10 +209,15 @@ class Qwen3OmniAudioEncoder(nn.Module):
         chunk_list = input_features.T.split(chunk_lengths.tolist(), dim=0)
         return nn.utils.rnn.pad_sequence(chunk_list, batch_first=True).transpose(1, 2)
 
-    def _build_chunk_mask(self, chunk_lengths: torch.Tensor, device: torch.device) -> torch.Tensor:
+    def _build_chunk_mask(
+        self, chunk_lengths: torch.Tensor, device: torch.device
+    ) -> torch.Tensor:
         feature_lens_after_cnn = self._get_feat_extract_output_lengths(chunk_lengths)
         return nn.utils.rnn.pad_sequence(
-            [torch.ones(length, dtype=torch.bool, device=device) for length in feature_lens_after_cnn],
+            [
+                torch.ones(length, dtype=torch.bool, device=device)
+                for length in feature_lens_after_cnn
+            ],
             batch_first=True,
         )
 
@@ -217,7 +234,9 @@ class Qwen3OmniAudioEncoder(nn.Module):
     ) -> torch.Tensor:
         chunk_lengths = self._build_chunk_lengths(feature_lens)
         padded_feature = self._pad_chunk_features(input_features, chunk_lengths)
-        padded_mask_after_cnn = self._build_chunk_mask(chunk_lengths, padded_feature.device)
+        padded_mask_after_cnn = self._build_chunk_mask(
+            chunk_lengths, padded_feature.device
+        )
 
         padded_feature = padded_feature.unsqueeze(1)
         padded_embeds = []
@@ -227,7 +246,9 @@ class Qwen3OmniAudioEncoder(nn.Module):
         padded_embed = torch.cat(padded_embeds, dim=0)
 
         b, c, f, t = padded_embed.size()
-        padded_embed = self.conv_out(padded_embed.permute(0, 3, 1, 2).contiguous().view(b, t, c * f))
+        padded_embed = self.conv_out(
+            padded_embed.permute(0, 3, 1, 2).contiguous().view(b, t, c * f)
+        )
 
         positional_embedding = (
             self.positional_embedding(padded_embed.shape[1])
@@ -301,11 +322,14 @@ class Qwen3OmniVisionEncoder(nn.Module):
         self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
 
         self.blocks = nn.ModuleList([VisionBlock(vision_config) for _ in range(depth)])
-        self.merger = VisionPatchMerger(config=vision_config, use_postshuffle_norm=False)
+        self.merger = VisionPatchMerger(
+            config=vision_config, use_postshuffle_norm=False
+        )
 
         self.deepstack_visual_indexes = list(deepstack_visual_indexes)
         self._deepstack_index_map = {
-            layer_idx: idx for idx, layer_idx in enumerate(self.deepstack_visual_indexes)
+            layer_idx: idx
+            for idx, layer_idx in enumerate(self.deepstack_visual_indexes)
         }
 
     @property
@@ -332,11 +356,21 @@ class Qwen3OmniVisionEncoder(nn.Module):
             intra_row = torch.arange(merge_size, device=device)
             intra_col = torch.arange(merge_size, device=device)
 
-            row_idx = block_rows[:, None, None, None] * merge_size + intra_row[None, None, :, None]
-            col_idx = block_cols[None, :, None, None] * merge_size + intra_col[None, None, None, :]
+            row_idx = (
+                block_rows[:, None, None, None] * merge_size
+                + intra_row[None, None, :, None]
+            )
+            col_idx = (
+                block_cols[None, :, None, None] * merge_size
+                + intra_col[None, None, None, :]
+            )
 
-            row_idx = row_idx.expand(merged_h, merged_w, merge_size, merge_size).reshape(-1)
-            col_idx = col_idx.expand(merged_h, merged_w, merge_size, merge_size).reshape(-1)
+            row_idx = row_idx.expand(
+                merged_h, merged_w, merge_size, merge_size
+            ).reshape(-1)
+            col_idx = col_idx.expand(
+                merged_h, merged_w, merge_size, merge_size
+            ).reshape(-1)
 
             coords = torch.stack((row_idx, col_idx), dim=-1)
 
@@ -390,19 +424,34 @@ class Qwen3OmniVisionEncoder(nn.Module):
                 idx_list[i].extend(indices[i].tolist())
                 weight_list[i].extend(weights[i].tolist())
 
-        idx_tensor = torch.tensor(idx_list, dtype=torch.long, device=self.pos_embed.weight.device)
-        weight_tensor = torch.tensor(weight_list, dtype=self.pos_embed.weight.dtype, device=self.pos_embed.weight.device)
+        idx_tensor = torch.tensor(
+            idx_list, dtype=torch.long, device=self.pos_embed.weight.device
+        )
+        weight_tensor = torch.tensor(
+            weight_list,
+            dtype=self.pos_embed.weight.dtype,
+            device=self.pos_embed.weight.device,
+        )
         pos_embeds = self.pos_embed(idx_tensor) * weight_tensor[:, :, None]
         patch_pos_embeds = pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
 
-        patch_pos_embeds = patch_pos_embeds.split([int(h * w) for h, w in zip(grid_hs, grid_ws)])
+        patch_pos_embeds = patch_pos_embeds.split(
+            [int(h * w) for h, w in zip(grid_hs, grid_ws)]
+        )
 
         patch_pos_embeds_permute = []
         merge_size = self.spatial_merge_size
         for pos_embed, t, h, w in zip(patch_pos_embeds, grid_ts, grid_hs, grid_ws):
             pos_embed = pos_embed.repeat(int(t), 1)
             pos_embed = (
-                pos_embed.view(int(t), int(h) // merge_size, merge_size, int(w) // merge_size, merge_size, -1)
+                pos_embed.view(
+                    int(t),
+                    int(h) // merge_size,
+                    merge_size,
+                    int(w) // merge_size,
+                    merge_size,
+                    -1,
+                )
                 .permute(0, 1, 3, 2, 4, 5)
                 .flatten(0, 4)
             )
@@ -475,39 +524,49 @@ class Qwen3OmniThinker(nn.Module):
         self.max_position_embeddings = text_config.get("max_position_embeddings", 32768)
         self.rope_theta = text_config.get("rope_theta", 10000.0)
         self.hidden_act = text_config.get("hidden_act", "silu")
-        self.head_dim = text_config.get("head_dim", self.hidden_size // self.num_attention_heads)
+        self.head_dim = text_config.get(
+            "head_dim", self.hidden_size // self.num_attention_heads
+        )
         self.use_qk_norm = text_config.get("use_qk_norm", False)
 
         # MoE config
         self.num_experts = text_config.get("num_experts", 0)
         self.num_experts_per_tok = text_config.get("num_experts_per_tok", 8)
         self.moe_intermediate_size = text_config.get("moe_intermediate_size", 768)
-        self.shared_expert_intermediate_size = text_config.get("shared_expert_intermediate_size", 0)
+        self.shared_expert_intermediate_size = text_config.get(
+            "shared_expert_intermediate_size", 0
+        )
         self.norm_topk_prob = text_config.get("norm_topk_prob", True)
 
         self.embed_tokens = nn.Embedding(self.vocab_size, self.hidden_size)
-        self.layers = nn.ModuleList([
-            MoeDecoderLayer(
-                hidden_size=self.hidden_size,
-                num_attention_heads=self.num_attention_heads,
-                num_key_value_heads=self.num_key_value_heads,
-                num_experts=self.num_experts,
-                num_experts_per_tok=self.num_experts_per_tok,
-                moe_intermediate_size=self.moe_intermediate_size,
-                shared_expert_intermediate_size=self.shared_expert_intermediate_size,
-                head_dim=self.head_dim,
-                rms_norm_eps=self.rms_norm_eps,
-                hidden_act=self.hidden_act,
-                norm_topk_prob=self.norm_topk_prob,
-                use_qk_norm=self.use_qk_norm,
-            )
-            for _ in range(self.num_hidden_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                MoeDecoderLayer(
+                    hidden_size=self.hidden_size,
+                    num_attention_heads=self.num_attention_heads,
+                    num_key_value_heads=self.num_key_value_heads,
+                    num_experts=self.num_experts,
+                    num_experts_per_tok=self.num_experts_per_tok,
+                    moe_intermediate_size=self.moe_intermediate_size,
+                    shared_expert_intermediate_size=self.shared_expert_intermediate_size,
+                    head_dim=self.head_dim,
+                    rms_norm_eps=self.rms_norm_eps,
+                    hidden_act=self.hidden_act,
+                    norm_topk_prob=self.norm_topk_prob,
+                    use_qk_norm=self.use_qk_norm,
+                )
+                for _ in range(self.num_hidden_layers)
+            ]
+        )
         self.norm = RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
         self.lm_head = nn.Linear(self.hidden_size, self.vocab_size, bias=False)
 
         rope_scaling = text_config.get("rope_scaling", {})
-        mrope_section = rope_scaling.get("mrope_section") if isinstance(rope_scaling, dict) else None
+        mrope_section = (
+            rope_scaling.get("mrope_section")
+            if isinstance(rope_scaling, dict)
+            else None
+        )
         self.rotary_emb = MRoPE(
             dim=self.head_dim,
             max_position_embeddings=self.max_position_embeddings,
@@ -606,7 +665,11 @@ class Qwen3OmniThinker(nn.Module):
             else:
                 skipped_count += 1
 
-        logger.info("Qwen3OmniThinker: loaded %d weights, skipped %d", loaded_count, skipped_count)
+        logger.info(
+            "Qwen3OmniThinker: loaded %d weights, skipped %d",
+            loaded_count,
+            skipped_count,
+        )
 
 
 # ---- Talker - Audio Codec Generator ----
@@ -642,7 +705,9 @@ class TalkerCodePredictor(nn.Module):
         self.intermediate_size = config.get("intermediate_size", 3072)
         self.rms_norm_eps = config.get("rms_norm_eps", 1e-6)
         self.hidden_act = config.get("hidden_act", "silu")
-        self.head_dim = config.get("head_dim", self.hidden_size // self.num_attention_heads)
+        self.head_dim = config.get(
+            "head_dim", self.hidden_size // self.num_attention_heads
+        )
         self.use_qk_norm = config.get("use_qk_norm", True)
         self.num_code_groups = config.get("num_code_groups", 16)
         self.max_position_embeddings = config.get("max_position_embeddings", 32768)
@@ -650,18 +715,20 @@ class TalkerCodePredictor(nn.Module):
         rope_params = config.get("rope_scaling") or config.get("rope_parameters") or {}
         self.mrope_section = rope_params.get("mrope_section")
 
-        self.layers = nn.ModuleList([
-            DecoderLayer(
-                hidden_size=self.hidden_size,
-                intermediate_size=self.intermediate_size,
-                num_attention_heads=self.num_attention_heads,
-                num_key_value_heads=self.num_key_value_heads,
-                head_dim=self.head_dim,
-                rms_norm_eps=self.rms_norm_eps,
-                use_qk_norm=self.use_qk_norm,
-            )
-            for _ in range(self.num_hidden_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                DecoderLayer(
+                    hidden_size=self.hidden_size,
+                    intermediate_size=self.intermediate_size,
+                    num_attention_heads=self.num_attention_heads,
+                    num_key_value_heads=self.num_key_value_heads,
+                    head_dim=self.head_dim,
+                    rms_norm_eps=self.rms_norm_eps,
+                    use_qk_norm=self.use_qk_norm,
+                )
+                for _ in range(self.num_hidden_layers)
+            ]
+        )
         self.norm = RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
         self.rotary_emb = MRoPE(
             dim=self.head_dim,
@@ -670,10 +737,16 @@ class TalkerCodePredictor(nn.Module):
             mrope_section=self.mrope_section,
         )
         self.codec_embedding = nn.ModuleList(
-            [nn.Embedding(self.vocab_size, self.hidden_size) for _ in range(self.num_code_groups - 1)]
+            [
+                nn.Embedding(self.vocab_size, self.hidden_size)
+                for _ in range(self.num_code_groups - 1)
+            ]
         )
         self.lm_head = nn.ModuleList(
-            [nn.Linear(self.hidden_size, self.vocab_size, bias=False) for _ in range(self.num_code_groups - 1)]
+            [
+                nn.Linear(self.hidden_size, self.vocab_size, bias=False)
+                for _ in range(self.num_code_groups - 1)
+            ]
         )
 
     def forward(
@@ -734,7 +807,9 @@ class TalkerCodePredictor(nn.Module):
         residual_hiddens: list[torch.Tensor] = []
         for step in range(self.num_code_groups - 1):
             logits, hidden_states = self.forward(
-                inputs_embeds=inputs_embeds, generation_steps=step, return_hidden_states=True
+                inputs_embeds=inputs_embeds,
+                generation_steps=step,
+                return_hidden_states=True,
             )
             next_token = sample_top_k_top_p(logits[:, -1, :], top_k, top_p)
             next_embed = self.codec_embedding[step](next_token).unsqueeze(1)
@@ -762,38 +837,46 @@ class Qwen3OmniTalker(nn.Module):
         self.num_key_value_heads = text_config.get("num_key_value_heads", 4)
         self.rms_norm_eps = text_config.get("rms_norm_eps", 1e-6)
         self.hidden_act = text_config.get("hidden_act", "silu")
-        self.head_dim = text_config.get("head_dim", self.hidden_size // self.num_attention_heads)
+        self.head_dim = text_config.get(
+            "head_dim", self.hidden_size // self.num_attention_heads
+        )
         self.use_qk_norm = text_config.get("use_qk_norm", True)
         self.max_position_embeddings = text_config.get("max_position_embeddings", 65536)
         self.rope_theta = text_config.get("rope_theta", 1000000.0)
-        rope_params = text_config.get("rope_scaling") or text_config.get("rope_parameters") or {}
+        rope_params = (
+            text_config.get("rope_scaling") or text_config.get("rope_parameters") or {}
+        )
         self.mrope_section = rope_params.get("mrope_section")
 
         # MoE config
         self.num_experts = text_config.get("num_experts", 0)
         self.num_experts_per_tok = text_config.get("num_experts_per_tok", 6)
         self.moe_intermediate_size = text_config.get("moe_intermediate_size", 384)
-        self.shared_expert_intermediate_size = text_config.get("shared_expert_intermediate_size", 0)
+        self.shared_expert_intermediate_size = text_config.get(
+            "shared_expert_intermediate_size", 0
+        )
         self.norm_topk_prob = text_config.get("norm_topk_prob", True)
 
         self.codec_embedding = nn.Embedding(self.vocab_size, self.hidden_size)
-        self.layers = nn.ModuleList([
-            MoeDecoderLayer(
-                hidden_size=self.hidden_size,
-                num_attention_heads=self.num_attention_heads,
-                num_key_value_heads=self.num_key_value_heads,
-                num_experts=self.num_experts,
-                num_experts_per_tok=self.num_experts_per_tok,
-                moe_intermediate_size=self.moe_intermediate_size,
-                shared_expert_intermediate_size=self.shared_expert_intermediate_size,
-                head_dim=self.head_dim,
-                rms_norm_eps=self.rms_norm_eps,
-                hidden_act=self.hidden_act,
-                norm_topk_prob=self.norm_topk_prob,
-                use_qk_norm=self.use_qk_norm,
-            )
-            for _ in range(self.num_hidden_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                MoeDecoderLayer(
+                    hidden_size=self.hidden_size,
+                    num_attention_heads=self.num_attention_heads,
+                    num_key_value_heads=self.num_key_value_heads,
+                    num_experts=self.num_experts,
+                    num_experts_per_tok=self.num_experts_per_tok,
+                    moe_intermediate_size=self.moe_intermediate_size,
+                    shared_expert_intermediate_size=self.shared_expert_intermediate_size,
+                    head_dim=self.head_dim,
+                    rms_norm_eps=self.rms_norm_eps,
+                    hidden_act=self.hidden_act,
+                    norm_topk_prob=self.norm_topk_prob,
+                    use_qk_norm=self.use_qk_norm,
+                )
+                for _ in range(self.num_hidden_layers)
+            ]
+        )
         self.norm = RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
         self.codec_head = nn.Linear(self.hidden_size, self.vocab_size, bias=False)
         self.rotary_emb = MRoPE(
@@ -831,7 +914,11 @@ class Qwen3OmniTalker(nn.Module):
         speaker: str | None = None,
         **kwargs,
     ) -> TalkerOutput:
-        if full_input_ids is not None and thinker_embed is not None and thinker_hidden is not None:
+        if (
+            full_input_ids is not None
+            and thinker_embed is not None
+            and thinker_hidden is not None
+        ):
             return self._generate_audio(
                 full_input_ids=full_input_ids,
                 thinker_embed=thinker_embed,
@@ -900,7 +987,7 @@ class Qwen3OmniTalker(nn.Module):
         **kwargs,
     ) -> TalkerOutput:
         """Generate codec tokens using complete thinker features.
-        
+
         This method is called when full thinker features are provided,
         executing the complete codec token generation pipeline.
         The generated codec tokens are then passed to Code2Wav for waveform synthesis.
@@ -918,7 +1005,9 @@ class Qwen3OmniTalker(nn.Module):
         codec_bos_id = talker_config.get("codec_bos_id", 0)
         codec_eos_id = talker_config.get("codec_eos_token_id", codec_vocab_size - 1)
         codebook_size = code2wav_config.get("codebook_size", 2048)
-        suppress_tokens = [i for i in range(codebook_size, codec_vocab_size) if i != codec_eos_id]
+        suppress_tokens = [
+            i for i in range(codebook_size, codec_vocab_size) if i != codec_eos_id
+        ]
 
         im_start_token_id = config.get("im_start_token_id", 151644)
         system_token_id = config.get("system_token_id", 8948)
@@ -951,15 +1040,24 @@ class Qwen3OmniTalker(nn.Module):
             )
             tts_token_embeds = self.codec_embedding(tts_tokens)
 
-        tts_bos_embed, tts_eos_embed, tts_pad_embed = (
-            self.text_projection(tts_token_embeds.to(device)).chunk(3, dim=1)
-        )
+        tts_bos_embed, tts_eos_embed, tts_pad_embed = self.text_projection(
+            tts_token_embeds.to(device)
+        ).chunk(3, dim=1)
 
-        im_start_indexes = torch.nonzero(full_input_ids[0] == im_start_token_id).squeeze()
+        im_start_indexes = torch.nonzero(
+            full_input_ids[0] == im_start_token_id
+        ).squeeze()
         if im_start_indexes.dim() == 0:
             im_start_indexes = im_start_indexes.unsqueeze(0)
         im_start_indexes = torch.cat(
-            (im_start_indexes, torch.tensor([full_input_ids.shape[-1]], device=device, dtype=full_input_ids.dtype)),
+            (
+                im_start_indexes,
+                torch.tensor(
+                    [full_input_ids.shape[-1]],
+                    device=device,
+                    dtype=full_input_ids.dtype,
+                ),
+            ),
             dim=-1,
         )
 
@@ -982,43 +1080,68 @@ class Qwen3OmniTalker(nn.Module):
                 )
                 user_mm_mask = multimodal_mask[:, im_start_index:segment_end_index]
                 if user_mm_mask.any():
-                    user_thinker_hidden_mm = thinker_hidden[:, im_start_index:segment_end_index][user_mm_mask]
-                    mm_hidden = self.hidden_projection(user_thinker_hidden_mm).to(thinker_hidden.device)
+                    user_thinker_hidden_mm = thinker_hidden[
+                        :, im_start_index:segment_end_index
+                    ][user_mm_mask]
+                    mm_hidden = self.hidden_projection(user_thinker_hidden_mm).to(
+                        thinker_hidden.device
+                    )
                     user_talker_part[user_mm_mask] = mm_hidden
-                user_thinker_embed = thinker_embed[:, im_start_index:segment_end_index][~user_mm_mask]
-                user_text_hidden = self.text_projection(user_thinker_embed).to(thinker_hidden.device)
+                user_thinker_embed = thinker_embed[:, im_start_index:segment_end_index][
+                    ~user_mm_mask
+                ]
+                user_text_hidden = self.text_projection(user_thinker_embed).to(
+                    thinker_hidden.device
+                )
                 user_talker_part[~user_mm_mask] = user_text_hidden
                 talker_input_embeds.append(user_talker_part)
-                talker_input_ids.append(full_input_ids[:, im_start_index:segment_end_index])
+                talker_input_ids.append(
+                    full_input_ids[:, im_start_index:segment_end_index]
+                )
 
             elif role_token == assistant_token_id and i == len(im_start_indexes) - 2:
                 assistant_hidden = self.text_projection(
                     thinker_embed[:, im_start_index:segment_end_index]
                 ).to(tts_pad_embed.device)
                 assistant_text_hidden = torch.cat(
-                    (assistant_hidden[:, :3], tts_pad_embed.expand(-1, 4, -1), tts_bos_embed, assistant_hidden[:, 3:4]),
+                    (
+                        assistant_hidden[:, :3],
+                        tts_pad_embed.expand(-1, 4, -1),
+                        tts_bos_embed,
+                        assistant_hidden[:, 3:4],
+                    ),
                     dim=1,
                 )
                 codec_special_tokens = torch.tensor(
-                    [[
-                        talker_config.get("codec_nothink_id", 0),
-                        talker_config.get("codec_think_bos_id", 0),
-                        talker_config.get("codec_think_eos_id", 0),
-                        speaker_id,
-                        talker_config.get("codec_pad_id", 0),
-                        codec_bos_id,
-                    ]],
+                    [
+                        [
+                            talker_config.get("codec_nothink_id", 0),
+                            talker_config.get("codec_think_bos_id", 0),
+                            talker_config.get("codec_think_eos_id", 0),
+                            speaker_id,
+                            talker_config.get("codec_pad_id", 0),
+                            codec_bos_id,
+                        ]
+                    ],
                     device=tts_pad_embed.device,
                     dtype=torch.long,
                 )
                 assistant_codec_hidden = torch.cat(
                     (
-                        torch.zeros((1, 3, hidden_size), device=tts_pad_embed.device, dtype=dtype),
-                        self.get_input_embeddings()(codec_special_tokens).to(tts_pad_embed.device),
+                        torch.zeros(
+                            (1, 3, hidden_size),
+                            device=tts_pad_embed.device,
+                            dtype=dtype,
+                        ),
+                        self.get_input_embeddings()(codec_special_tokens).to(
+                            tts_pad_embed.device
+                        ),
                     ),
                     dim=1,
                 )
-                trailing_text_hidden = torch.cat((assistant_hidden[:, 4:], tts_eos_embed), dim=1)
+                trailing_text_hidden = torch.cat(
+                    (assistant_hidden[:, 4:], tts_eos_embed), dim=1
+                )
                 input_embeds = assistant_text_hidden + assistant_codec_hidden
                 input_ids_segment = torch.full(
                     (1, assistant_text_hidden.shape[1]),
@@ -1032,10 +1155,14 @@ class Qwen3OmniTalker(nn.Module):
         if not talker_input_embeds:
             return TalkerOutput(codec_tokens=torch.tensor([[]], device=device))
 
-        talker_input_embed = torch.cat([embed.to(device) for embed in talker_input_embeds], dim=1)
+        talker_input_embed = torch.cat(
+            [embed.to(device) for embed in talker_input_embeds], dim=1
+        )
         talker_input_id = torch.cat([ids.to(device) for ids in talker_input_ids], dim=1)
 
-        text_token_count = trailing_text_hidden.shape[1] if trailing_text_hidden is not None else 0
+        text_token_count = (
+            trailing_text_hidden.shape[1] if trailing_text_hidden is not None else 0
+        )
         max_audio_from_text = text_token_count * 10 + 200
         max_new_tokens = min(kwargs.get("max_new_tokens", 4096), max_audio_from_text)
 
@@ -1047,7 +1174,9 @@ class Qwen3OmniTalker(nn.Module):
         code_top_p = kwargs.get("code_top_p", 0.8)
         do_sample = temperature > 0
 
-        attention_mask = torch.ones((1, talker_input_embed.shape[1]), device=device, dtype=torch.long)
+        attention_mask = torch.ones(
+            (1, talker_input_embed.shape[1]), device=device, dtype=torch.long
+        )
         position_ids, rope_deltas = _get_rope_index(talker_input_id, attention_mask)
 
         outputs = self._forward_step(
@@ -1066,7 +1195,14 @@ class Qwen3OmniTalker(nn.Module):
             else suppress_tokens
         )
         next_token = sample_logits(
-            logits, do_sample, temperature, top_k, top_p, prefill_suppress, repetition_penalty, generated_token_ids
+            logits,
+            do_sample,
+            temperature,
+            top_k,
+            top_p,
+            prefill_suppress,
+            repetition_penalty,
+            generated_token_ids,
         )
         generated_token_ids.append(next_token.item())
         codec_ids = [next_token]
@@ -1076,15 +1212,22 @@ class Qwen3OmniTalker(nn.Module):
 
         for _ in range(max_new_tokens):
             last_id_hidden = self.codec_embedding(next_token.view(1, 1))
-            residual_codes, residual_hiddens = self.code_predictor.generate_residual_codes(
-                hidden_states[:, -1:, :], last_id_hidden, top_k=code_top_k, top_p=code_top_p
+            residual_codes, residual_hiddens = (
+                self.code_predictor.generate_residual_codes(
+                    hidden_states[:, -1:, :],
+                    last_id_hidden,
+                    top_k=code_top_k,
+                    top_p=code_top_p,
+                )
             )
             residual_codes_list.append(residual_codes)
 
             if residual_hiddens:
                 last_group_idx = residual_codes.shape[0] - 1
                 last_residual_ids = residual_codes[last_group_idx].unsqueeze(0)
-                last_residual_hidden = self.code_predictor.codec_embedding[last_group_idx](last_residual_ids)
+                last_residual_hidden = self.code_predictor.codec_embedding[
+                    last_group_idx
+                ](last_residual_ids)
                 residual_hiddens = (
                     residual_hiddens[:-1] + [last_residual_hidden]
                     if len(residual_hiddens) > 1
@@ -1094,19 +1237,29 @@ class Qwen3OmniTalker(nn.Module):
             codec_hiddens = torch.cat([last_id_hidden] + residual_hiddens, dim=1)
             inputs_embeds = codec_hiddens.sum(1, keepdim=True)
 
-            if trailing_text_hidden is not None and generation_step < trailing_text_hidden.shape[1]:
-                inputs_embeds = inputs_embeds + trailing_text_hidden[:, generation_step].unsqueeze(1)
+            if (
+                trailing_text_hidden is not None
+                and generation_step < trailing_text_hidden.shape[1]
+            ):
+                inputs_embeds = inputs_embeds + trailing_text_hidden[
+                    :, generation_step
+                ].unsqueeze(1)
             else:
                 inputs_embeds = inputs_embeds + tts_pad_embed
 
             past_len = past_kv[0][0].shape[2] if past_kv is not None else 0
             delta = (past_len + rope_deltas).to(inputs_embeds.device)
-            step_pos_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device)
+            step_pos_ids = torch.arange(
+                inputs_embeds.shape[1], device=inputs_embeds.device
+            )
             step_pos_ids = step_pos_ids.view(1, -1).expand(delta.shape[0], -1)
             step_pos_ids = (step_pos_ids + delta).unsqueeze(0).expand(3, -1, -1)
 
             outputs = self._forward_step(
-                inputs_embeds=inputs_embeds, past_key_values=past_kv, use_cache=True, position_ids=step_pos_ids
+                inputs_embeds=inputs_embeds,
+                past_key_values=past_kv,
+                use_cache=True,
+                position_ids=step_pos_ids,
             )
             past_kv = outputs.past_key_values
             hidden_states = outputs.hidden_states
@@ -1114,11 +1267,19 @@ class Qwen3OmniTalker(nn.Module):
 
             step_suppress = (
                 suppress_tokens + [codec_eos_id]
-                if trailing_text_hidden is not None and generation_step < trailing_text_hidden.shape[1] - 1
+                if trailing_text_hidden is not None
+                and generation_step < trailing_text_hidden.shape[1] - 1
                 else suppress_tokens
             )
             next_token = sample_logits(
-                logits, do_sample, temperature, top_k, top_p, step_suppress, repetition_penalty, generated_token_ids
+                logits,
+                do_sample,
+                temperature,
+                top_k,
+                top_p,
+                step_suppress,
+                repetition_penalty,
+                generated_token_ids,
             )
             generation_step += 1
 
@@ -1133,12 +1294,19 @@ class Qwen3OmniTalker(nn.Module):
         if len(residual_codes_list) < codec_ids_tensor.shape[1]:
             last_id_hidden = self.codec_embedding(codec_ids_tensor[:, -1:])
             residual_codes, _ = self.code_predictor.generate_residual_codes(
-                hidden_states[:, -1:, :], last_id_hidden, top_k=code_top_k, top_p=code_top_p
+                hidden_states[:, -1:, :],
+                last_id_hidden,
+                top_k=code_top_k,
+                top_p=code_top_p,
             )
             residual_codes_list.append(residual_codes)
 
-        residual_codes = torch.cat(residual_codes_list[: codec_ids_tensor.shape[1]], dim=1)
-        codec_tensor = torch.cat([codec_ids_tensor.unsqueeze(1), residual_codes.unsqueeze(0)], dim=1)
+        residual_codes = torch.cat(
+            residual_codes_list[: codec_ids_tensor.shape[1]], dim=1
+        )
+        codec_tensor = torch.cat(
+            [codec_ids_tensor.unsqueeze(1), residual_codes.unsqueeze(0)], dim=1
+        )
 
         return TalkerOutput(
             codec_tokens=codec_tensor,
@@ -1222,7 +1390,11 @@ class Qwen3OmniTalker(nn.Module):
             else:
                 skipped_count += 1
 
-        logger.info("Qwen3OmniTalker: loaded %d weights, skipped %d", loaded_count, skipped_count)
+        logger.info(
+            "Qwen3OmniTalker: loaded %d weights, skipped %d",
+            loaded_count,
+            skipped_count,
+        )
 
 
 # ---- Code2Wav - Vocoder ----
@@ -1260,10 +1432,14 @@ class Qwen3OmniCode2Wav(nn.Module):
         upsample_blocks: list[nn.ModuleList] = []
         for factor in self.upsampling_ratios:
             upsample_blocks.append(
-                nn.ModuleList([
-                    CausalTransConv1d(self.hidden_size, self.hidden_size, factor, factor),
-                    Code2WavConvNeXtBlock(self.hidden_size),
-                ])
+                nn.ModuleList(
+                    [
+                        CausalTransConv1d(
+                            self.hidden_size, self.hidden_size, factor, factor
+                        ),
+                        Code2WavConvNeXtBlock(self.hidden_size),
+                    ]
+                )
             )
         self.upsample = nn.ModuleList(upsample_blocks)
 
@@ -1291,7 +1467,7 @@ class Qwen3OmniCode2Wav(nn.Module):
         **kwargs,
     ) -> Code2WavOutput:
         """Convert codec tokens to waveform.
-        
+
         Args:
             codes: Codec tokens tensor (legacy parameter name)
             codec_tokens: Codec tokens tensor (preferred parameter name)
@@ -1300,10 +1476,10 @@ class Qwen3OmniCode2Wav(nn.Module):
         """
         if codec_tokens is not None:
             codes = codec_tokens
-        
+
         if codes is None:
             raise ValueError("Either 'codes' or 'codec_tokens' must be provided")
-        
+
         if codes.dim() == 2:
             codes = codes.unsqueeze(0)
 
@@ -1364,7 +1540,11 @@ class Qwen3OmniCode2Wav(nn.Module):
             else:
                 skipped_count += 1
 
-        logger.info("Qwen3OmniCode2Wav: loaded %d weights, skipped %d", loaded_count, skipped_count)
+        logger.info(
+            "Qwen3OmniCode2Wav: loaded %d weights, skipped %d",
+            loaded_count,
+            skipped_count,
+        )
 
 
 # ---- Model Registry ----
@@ -1387,7 +1567,9 @@ WEIGHT_PREFIX: dict[str, str] = {
 def get_model_class(name: str) -> type[nn.Module]:
     """Get model class by name."""
     if name not in MODEL_REGISTRY:
-        raise ValueError(f"Unknown model: {name}. Available: {list(MODEL_REGISTRY.keys())}")
+        raise ValueError(
+            f"Unknown model: {name}. Available: {list(MODEL_REGISTRY.keys())}"
+        )
     return MODEL_REGISTRY[name]
 
 
@@ -1412,7 +1594,9 @@ def _get_rope_index(
     position_ids.masked_fill_(attention_mask == 0, 1)
     position_ids = position_ids.unsqueeze(0).expand(3, -1, -1).to(attention_mask.device)
     max_position_ids = position_ids.max(0, keepdim=False)[0].max(-1, keepdim=True)[0]
-    mrope_position_deltas = max_position_ids + 1 - torch.sum(attention_mask, dim=-1, keepdim=True)
+    mrope_position_deltas = (
+        max_position_ids + 1 - torch.sum(attention_mask, dim=-1, keepdim=True)
+    )
     return position_ids, mrope_position_deltas
 
 
@@ -1437,7 +1621,9 @@ def compute_thinker_features_for_talker(
     output_ids_tensor = torch.tensor(
         output_ids, device=model_device, dtype=input_ids_device.dtype
     )
-    full_input_ids = torch.cat([input_ids_device, output_ids_tensor], dim=0).unsqueeze(0)
+    full_input_ids = torch.cat([input_ids_device, output_ids_tensor], dim=0).unsqueeze(
+        0
+    )
 
     talker_config = config.get("talker_config", {})
     accept_hidden_layer = talker_config.get("accept_hidden_layer", 24)
@@ -1498,7 +1684,9 @@ def run_talker_generation(
     codec_bos_id = talker_config.get("codec_bos_id", 0)
     codec_eos_id = talker_config.get("codec_eos_token_id", codec_vocab_size - 1)
     codebook_size = code2wav_config.get("codebook_size", 2048)
-    suppress_tokens = [i for i in range(codebook_size, codec_vocab_size) if i != codec_eos_id]
+    suppress_tokens = [
+        i for i in range(codebook_size, codec_vocab_size) if i != codec_eos_id
+    ]
 
     im_start_token_id = config.get("im_start_token_id", 151644)
     system_token_id = config.get("system_token_id", 8948)
@@ -1513,7 +1701,9 @@ def run_talker_generation(
     talker_device = next(talker.parameters()).device if talker else device
     talker_dtype = next(talker.parameters()).dtype if talker else torch.float16
 
-    def _ensure_tensor(value: Any, dev: str, dtype: torch.dtype | None = None) -> torch.Tensor | None:
+    def _ensure_tensor(
+        value: Any, dev: str, dtype: torch.dtype | None = None
+    ) -> torch.Tensor | None:
         if value is None:
             return None
         if not torch.is_tensor(value):
@@ -1551,15 +1741,20 @@ def run_talker_generation(
         )
         tts_token_embeds = talker.get_input_embeddings()(tts_tokens)
 
-    tts_bos_embed, tts_eos_embed, tts_pad_embed = (
-        talker.text_projection(tts_token_embeds.to(device)).chunk(3, dim=1)
-    )
+    tts_bos_embed, tts_eos_embed, tts_pad_embed = talker.text_projection(
+        tts_token_embeds.to(device)
+    ).chunk(3, dim=1)
 
     im_start_indexes = torch.nonzero(full_input_ids[0] == im_start_token_id).squeeze()
     if im_start_indexes.dim() == 0:
         im_start_indexes = im_start_indexes.unsqueeze(0)
     im_start_indexes = torch.cat(
-        (im_start_indexes, torch.tensor([full_input_ids.shape[-1]], device=device, dtype=full_input_ids.dtype)),
+        (
+            im_start_indexes,
+            torch.tensor(
+                [full_input_ids.shape[-1]], device=device, dtype=full_input_ids.dtype
+            ),
+        ),
         dim=-1,
     )
 
@@ -1582,11 +1777,19 @@ def run_talker_generation(
             )
             user_mm_mask = multimodal_mask[:, im_start_index:segment_end_index]
             if user_mm_mask.any():
-                user_thinker_hidden_mm = thinker_hidden[:, im_start_index:segment_end_index][user_mm_mask]
-                mm_hidden = talker.hidden_projection(user_thinker_hidden_mm).to(thinker_hidden.device)
+                user_thinker_hidden_mm = thinker_hidden[
+                    :, im_start_index:segment_end_index
+                ][user_mm_mask]
+                mm_hidden = talker.hidden_projection(user_thinker_hidden_mm).to(
+                    thinker_hidden.device
+                )
                 user_talker_part[user_mm_mask] = mm_hidden
-            user_thinker_embed = thinker_embed[:, im_start_index:segment_end_index][~user_mm_mask]
-            user_text_hidden = talker.text_projection(user_thinker_embed).to(thinker_hidden.device)
+            user_thinker_embed = thinker_embed[:, im_start_index:segment_end_index][
+                ~user_mm_mask
+            ]
+            user_text_hidden = talker.text_projection(user_thinker_embed).to(
+                thinker_hidden.device
+            )
             user_talker_part[~user_mm_mask] = user_text_hidden
             talker_input_embeds.append(user_talker_part)
             talker_input_ids.append(full_input_ids[:, im_start_index:segment_end_index])
@@ -1596,29 +1799,44 @@ def run_talker_generation(
                 thinker_embed[:, im_start_index:segment_end_index]
             ).to(tts_pad_embed.device)
             assistant_text_hidden = torch.cat(
-                (assistant_hidden[:, :3], tts_pad_embed.expand(-1, 4, -1), tts_bos_embed, assistant_hidden[:, 3:4]),
+                (
+                    assistant_hidden[:, :3],
+                    tts_pad_embed.expand(-1, 4, -1),
+                    tts_bos_embed,
+                    assistant_hidden[:, 3:4],
+                ),
                 dim=1,
             )
             codec_special_tokens = torch.tensor(
-                [[
-                    talker_config.get("codec_nothink_id", 0),
-                    talker_config.get("codec_think_bos_id", 0),
-                    talker_config.get("codec_think_eos_id", 0),
-                    speaker_id,
-                    talker_config.get("codec_pad_id", 0),
-                    codec_bos_id,
-                ]],
+                [
+                    [
+                        talker_config.get("codec_nothink_id", 0),
+                        talker_config.get("codec_think_bos_id", 0),
+                        talker_config.get("codec_think_eos_id", 0),
+                        speaker_id,
+                        talker_config.get("codec_pad_id", 0),
+                        codec_bos_id,
+                    ]
+                ],
                 device=tts_pad_embed.device,
                 dtype=torch.long,
             )
             assistant_codec_hidden = torch.cat(
                 (
-                    torch.zeros((1, 3, hidden_size), device=tts_pad_embed.device, dtype=talker_dtype),
-                    talker.get_input_embeddings()(codec_special_tokens).to(tts_pad_embed.device),
+                    torch.zeros(
+                        (1, 3, hidden_size),
+                        device=tts_pad_embed.device,
+                        dtype=talker_dtype,
+                    ),
+                    talker.get_input_embeddings()(codec_special_tokens).to(
+                        tts_pad_embed.device
+                    ),
                 ),
                 dim=1,
             )
-            trailing_text_hidden = torch.cat((assistant_hidden[:, 4:], tts_eos_embed), dim=1)
+            trailing_text_hidden = torch.cat(
+                (assistant_hidden[:, 4:], tts_eos_embed), dim=1
+            )
             input_embeds = assistant_text_hidden + assistant_codec_hidden
             input_ids = torch.full(
                 (1, assistant_text_hidden.shape[1]),
@@ -1629,10 +1847,14 @@ def run_talker_generation(
             talker_input_embeds.append(input_embeds)
             talker_input_ids.append(input_ids)
 
-    talker_input_embed = torch.cat([embed.to(device) for embed in talker_input_embeds], dim=1)
+    talker_input_embed = torch.cat(
+        [embed.to(device) for embed in talker_input_embeds], dim=1
+    )
     talker_input_id = torch.cat([ids.to(device) for ids in talker_input_ids], dim=1)
 
-    text_token_count = trailing_text_hidden.shape[1] if trailing_text_hidden is not None else 0
+    text_token_count = (
+        trailing_text_hidden.shape[1] if trailing_text_hidden is not None else 0
+    )
     max_audio_from_text = text_token_count * 10 + 200
     max_new_tokens = min(data.get("max_audio_tokens", 4096), max_audio_from_text)
 
@@ -1644,7 +1866,9 @@ def run_talker_generation(
     code_top_p = params.get("code_top_p", 0.8)
     do_sample = temperature > 0
 
-    attention_mask = torch.ones((1, talker_input_embed.shape[1]), device=device, dtype=torch.long)
+    attention_mask = torch.ones(
+        (1, talker_input_embed.shape[1]), device=device, dtype=torch.long
+    )
     position_ids, rope_deltas = _get_rope_index(talker_input_id, attention_mask)
 
     outputs = talker(
@@ -1663,7 +1887,14 @@ def run_talker_generation(
         else suppress_tokens
     )
     next_token = sample_logits(
-        logits, do_sample, temperature, top_k, top_p, prefill_suppress, repetition_penalty, generated_token_ids
+        logits,
+        do_sample,
+        temperature,
+        top_k,
+        top_p,
+        prefill_suppress,
+        repetition_penalty,
+        generated_token_ids,
     )
     generated_token_ids.append(next_token.item())
     codec_ids = [next_token]
@@ -1673,15 +1904,22 @@ def run_talker_generation(
 
     for _ in range(max_new_tokens):
         last_id_hidden = talker.codec_embedding(next_token.view(1, 1))
-        residual_codes, residual_hiddens = talker.code_predictor.generate_residual_codes(
-            hidden_states[:, -1:, :], last_id_hidden, top_k=code_top_k, top_p=code_top_p
+        residual_codes, residual_hiddens = (
+            talker.code_predictor.generate_residual_codes(
+                hidden_states[:, -1:, :],
+                last_id_hidden,
+                top_k=code_top_k,
+                top_p=code_top_p,
+            )
         )
         residual_codes_list.append(residual_codes)
 
         if residual_hiddens:
             last_group_idx = residual_codes.shape[0] - 1
             last_residual_ids = residual_codes[last_group_idx].unsqueeze(0)
-            last_residual_hidden = talker.code_predictor.codec_embedding[last_group_idx](last_residual_ids)
+            last_residual_hidden = talker.code_predictor.codec_embedding[
+                last_group_idx
+            ](last_residual_ids)
             residual_hiddens = (
                 residual_hiddens[:-1] + [last_residual_hidden]
                 if len(residual_hiddens) > 1
@@ -1691,8 +1929,13 @@ def run_talker_generation(
         codec_hiddens = torch.cat([last_id_hidden] + residual_hiddens, dim=1)
         inputs_embeds = codec_hiddens.sum(1, keepdim=True)
 
-        if trailing_text_hidden is not None and generation_step < trailing_text_hidden.shape[1]:
-            inputs_embeds = inputs_embeds + trailing_text_hidden[:, generation_step].unsqueeze(1)
+        if (
+            trailing_text_hidden is not None
+            and generation_step < trailing_text_hidden.shape[1]
+        ):
+            inputs_embeds = inputs_embeds + trailing_text_hidden[
+                :, generation_step
+            ].unsqueeze(1)
         else:
             inputs_embeds = inputs_embeds + tts_pad_embed
 
@@ -1703,7 +1946,10 @@ def run_talker_generation(
         step_pos_ids = (step_pos_ids + delta).unsqueeze(0).expand(3, -1, -1)
 
         outputs = talker(
-            inputs_embeds=inputs_embeds, past_key_values=past_kv, use_cache=True, position_ids=step_pos_ids
+            inputs_embeds=inputs_embeds,
+            past_key_values=past_kv,
+            use_cache=True,
+            position_ids=step_pos_ids,
         )
         past_kv = outputs.past_key_values
         hidden_states = outputs.hidden_states
@@ -1711,11 +1957,19 @@ def run_talker_generation(
 
         step_suppress = (
             suppress_tokens + [codec_eos_id]
-            if trailing_text_hidden is not None and generation_step < trailing_text_hidden.shape[1] - 1
+            if trailing_text_hidden is not None
+            and generation_step < trailing_text_hidden.shape[1] - 1
             else suppress_tokens
         )
         next_token = sample_logits(
-            logits, do_sample, temperature, top_k, top_p, step_suppress, repetition_penalty, generated_token_ids
+            logits,
+            do_sample,
+            temperature,
+            top_k,
+            top_p,
+            step_suppress,
+            repetition_penalty,
+            generated_token_ids,
         )
         generation_step += 1
 
@@ -1735,9 +1989,13 @@ def run_talker_generation(
         residual_codes_list.append(residual_codes)
 
     residual_codes = torch.cat(residual_codes_list[: codec_ids.shape[1]], dim=1)
-    codec_tensor = torch.cat([codec_ids.unsqueeze(1), residual_codes.unsqueeze(0)], dim=1)
+    codec_tensor = torch.cat(
+        [codec_ids.unsqueeze(1), residual_codes.unsqueeze(0)], dim=1
+    )
 
-    waveform_tensor = code2wav.chunked_decode(codec_tensor, chunk_size=300, left_context_size=25)
+    waveform_tensor = code2wav.chunked_decode(
+        codec_tensor, chunk_size=300, left_context_size=25
+    )
     waveform_tensor = waveform_tensor.float().detach().squeeze()
     waveform = waveform_tensor.cpu().numpy()
 
@@ -1763,6 +2021,7 @@ def create_thinker_result_builder(
     Otherwise, just passes through the output_ids.
     """
     from typing import TYPE_CHECKING
+
     if TYPE_CHECKING:
         from sglang_omni.proto import StagePayload
 
@@ -1774,7 +2033,9 @@ def create_thinker_result_builder(
         params = payload.request.params if payload.request else {}
         return_audio = params.get("return_audio", False)
 
-        input_ids = payload.data.get("input_ids") if isinstance(payload.data, dict) else None
+        input_ids = (
+            payload.data.get("input_ids") if isinstance(payload.data, dict) else None
+        )
 
         if return_audio and input_ids is not None and model is not None:
             features = compute_thinker_features_for_talker(
@@ -1802,13 +2063,14 @@ def create_thinker_result_builder(
 def create_talker_result_builder(**kwargs: Any):
     """Create result builder for Talker stage."""
     from typing import TYPE_CHECKING
+
     if TYPE_CHECKING:
         from sglang_omni.proto import StagePayload
 
     def result_builder(payload: "StagePayload", result: Any) -> "StagePayload":
         if not isinstance(payload.data, dict):
             payload.data = {}
-        
+
         if isinstance(result, TalkerOutput):
             payload.data["model_output"] = result
             if result.codec_tokens is not None:
@@ -1825,13 +2087,14 @@ def create_talker_result_builder(**kwargs: Any):
 def create_code2wav_result_builder(**kwargs: Any):
     """Create result builder for Code2Wav stage."""
     from typing import TYPE_CHECKING
+
     if TYPE_CHECKING:
         from sglang_omni.proto import StagePayload
 
     def result_builder(payload: "StagePayload", result: Any) -> "StagePayload":
         if not isinstance(payload.data, dict):
             payload.data = {}
-        
+
         if isinstance(result, Code2WavOutput):
             payload.data["model_output"] = result
             payload.data["waveform"] = result.waveform

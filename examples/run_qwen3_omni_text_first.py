@@ -23,7 +23,11 @@ def parse_args() -> argparse.Namespace:
         default="Qwen/Qwen3-Omni-30B-A3B-Instruct",
         help="Local model path or Hugging Face model id",
     )
-    parser.add_argument("--prompt", type=str, default="Describe both the image and the audio content in detail.")
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default="Describe both the image and the audio content in detail.",
+    )
     parser.add_argument("--dtype", type=str, default="bfloat16")
     parser.add_argument("--thinker-max-seq-len", type=int, default=81920)
     parser.add_argument("--max-new-tokens", type=int, default=2048)

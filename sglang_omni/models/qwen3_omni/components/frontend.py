@@ -6,7 +6,6 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-from transformers import AutoFeatureExtractor, AutoImageProcessor, AutoTokenizer
 from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
     Qwen3OmniMoeProcessor,
 )
@@ -23,6 +22,7 @@ from sglang_omni.frontends import (
 )
 from sglang_omni.models.qwen3_omni.io import PipelineState
 from sglang_omni.proto import StagePayload
+
 
 class Qwen3OmniFrontend:
     """CPU-side preprocessing and tokenization using the HF processor."""

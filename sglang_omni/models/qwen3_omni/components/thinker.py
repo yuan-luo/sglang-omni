@@ -7,12 +7,14 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import transformers
 from accelerate import init_empty_weights
 from transformers.models.qwen3_omni_moe import modeling_qwen3_omni_moe as hf_modeling
 
-import transformers
-
-from sglang_omni.models.qwen3_omni.components.common import concat_features, load_thinker_config
+from sglang_omni.models.qwen3_omni.components.common import (
+    concat_features,
+    load_thinker_config,
+)
 from sglang_omni.models.utils.hf import instantiate_module
 from sglang_omni.models.weight_loader import load_module, resolve_dtype
 
@@ -261,11 +263,7 @@ class Qwen3OmniSplitThinker(nn.Module):
             # get_placeholder_mask returns a 3D (B, S, H) boolean mask.
             # HF <5 _deepstack_process reduces it internally via [..0];
             # HF >=5 expects the caller to pass an already-reduced 2D mask.
-            if (
-                _HF_DEEPSTACK_NEEDS_2D_MASK
-                and _vpm is not None
-                and _vpm.dim() > 2
-            ):
+            if _HF_DEEPSTACK_NEEDS_2D_MASK and _vpm is not None and _vpm.dim() > 2:
                 _vpm = _vpm[..., 0]
             _orig = self.thinker.model.forward
 

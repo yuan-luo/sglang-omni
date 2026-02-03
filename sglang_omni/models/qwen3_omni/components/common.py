@@ -40,9 +40,7 @@ class Qwen3OmniSpec:
     spatial_merge_size: int
 
     @classmethod
-    def from_model_path(
-        cls, model_path: str
-    ) -> "Qwen3OmniSpec":
+    def from_model_path(cls, model_path: str) -> "Qwen3OmniSpec":
         thinker_cfg = load_thinker_config(model_path)
         vision_cfg = thinker_cfg.vision_config
         return cls(

@@ -3,13 +3,12 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 
 # ---- RMSNorm (HF-compatible) ----
 
@@ -104,8 +103,10 @@ class MRoPE(nn.Module):
         if position_ids.ndim == 2:
             position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
         inv_freq = self.inv_freq.to(position_ids.device)
-        inv_freq_expanded = inv_freq[None, None, :, None].float().expand(
-            3, position_ids.shape[1], -1, 1
+        inv_freq_expanded = (
+            inv_freq[None, None, :, None]
+            .float()
+            .expand(3, position_ids.shape[1], -1, 1)
         )
         position_ids_expanded = position_ids[:, :, None, :].float()
         freqs = (inv_freq_expanded @ position_ids_expanded).transpose(2, 3)
@@ -180,8 +181,12 @@ class Attention(nn.Module):
         self.num_kv_groups = self.num_heads // self.num_kv_heads
 
         self.q_proj = nn.Linear(hidden_size, num_heads * self.head_dim, bias=bias)
-        self.k_proj = nn.Linear(hidden_size, self.num_kv_heads * self.head_dim, bias=bias)
-        self.v_proj = nn.Linear(hidden_size, self.num_kv_heads * self.head_dim, bias=bias)
+        self.k_proj = nn.Linear(
+            hidden_size, self.num_kv_heads * self.head_dim, bias=bias
+        )
+        self.v_proj = nn.Linear(
+            hidden_size, self.num_kv_heads * self.head_dim, bias=bias
+        )
         self.o_proj = nn.Linear(num_heads * self.head_dim, hidden_size, bias=bias)
 
         self.use_qk_norm = use_qk_norm
@@ -227,7 +232,9 @@ class Attention(nn.Module):
 
         is_causal = attention_mask is None and q_len > 1
         attn_output = F.scaled_dot_product_attention(
-            q, k, v,
+            q,
+            k,
+            v,
             attn_mask=attention_mask,
             is_causal=is_causal,
             enable_gqa=self.num_kv_groups > 1,
@@ -283,8 +290,16 @@ class MoeExperts(nn.Module):
         )
         self.act_fn = nn.SiLU() if hidden_act == "silu" else nn.GELU()
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-                              missing_keys, unexpected_keys, error_msgs):
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
         # Checkpoint stores per-expert separate weights:
         #   {prefix}0.gate_proj.weight, {prefix}0.up_proj.weight, {prefix}0.down_proj.weight
         # Fuse them into gate_up_proj and down_proj 3D tensors.
@@ -300,8 +315,13 @@ class MoeExperts(nn.Module):
             )
             state_dict[f"{prefix}down_proj"] = torch.stack(down_list)
         super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict,
-            missing_keys, unexpected_keys, error_msgs,
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
         )
 
     def forward(
@@ -337,7 +357,9 @@ class MoeExperts(nn.Module):
 
         # Compute per-expert token counts and cumulative offsets
         num_per_expert = torch.histc(
-            expert_ids_g.float(), bins=self.num_experts, min=0,
+            expert_ids_g.float(),
+            bins=self.num_experts,
+            min=0,
             max=self.num_experts - 1,
         )
         offsets = torch.cumsum(num_per_expert, dim=0, dtype=torch.int32)
@@ -352,9 +374,7 @@ class MoeExperts(nn.Module):
         gated = self.act_fn(gate) * up
 
         # Down projection via grouped_mm
-        out_g = torch._grouped_mm(
-            gated, self.down_proj.transpose(-2, -1), offs=offsets
-        )
+        out_g = torch._grouped_mm(gated, self.down_proj.transpose(-2, -1), offs=offsets)
 
         # Apply routing weights and restore original order
         out_g = out_g * sample_weights_g
@@ -447,7 +467,9 @@ class SparseMoeBlock(nn.Module):
         )
         if shared_expert_output is not None:
             shared_gate = torch.sigmoid(self.shared_expert_gate(hidden_states_reshaped))
-            final_hidden_states = final_hidden_states + shared_gate * shared_expert_output
+            final_hidden_states = (
+                final_hidden_states + shared_gate * shared_expert_output
+            )
         return final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
 
 
@@ -595,9 +617,21 @@ class AudioEncoderAttention(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         bsz, seq_length, _ = hidden_states.size()
-        q = self.q_proj(hidden_states).view(bsz, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(hidden_states).view(bsz, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(hidden_states).view(bsz, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
+        q = (
+            self.q_proj(hidden_states)
+            .view(bsz, seq_length, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+        )
+        k = (
+            self.k_proj(hidden_states)
+            .view(bsz, seq_length, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+        )
+        v = (
+            self.v_proj(hidden_states)
+            .view(bsz, seq_length, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+        )
         attn_output = F.scaled_dot_product_attention(q, k, v)
         attn_output = attn_output.transpose(1, 2).contiguous().view(bsz, seq_length, -1)
         return self.out_proj(attn_output)
@@ -658,7 +692,9 @@ class SnakeBeta(nn.Module):
         beta = self.beta.unsqueeze(0).unsqueeze(-1)
         alpha = torch.exp(alpha)
         beta = torch.exp(beta)
-        return x + (1.0 / (beta + self.no_div_by_zero)) * torch.pow(torch.sin(x * alpha), 2)
+        return x + (1.0 / (beta + self.no_div_by_zero)) * torch.pow(
+            torch.sin(x * alpha), 2
+        )
 
 
 class Code2WavLayerScale(nn.Module):
@@ -675,7 +711,9 @@ class Code2WavLayerScale(nn.Module):
 class Code2WavRotaryEmbedding(nn.Module):
     """Simple rotary embedding for Code2Wav (standard RoPE, no MRoPE)."""
 
-    def __init__(self, dim: int, max_position_embeddings: int = 8000, base: float = 10000.0):
+    def __init__(
+        self, dim: int, max_position_embeddings: int = 8000, base: float = 10000.0
+    ):
         super().__init__()
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
@@ -684,7 +722,9 @@ class Code2WavRotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     @torch.no_grad()
-    def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor, position_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         inv_freq = self.inv_freq.to(x.device)
         freqs = torch.einsum("bs,d->bsd", position_ids.float(), inv_freq)
         emb = torch.cat([freqs, freqs], dim=-1)
@@ -713,18 +753,30 @@ class Code2WavPreTransformerLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
 
         self.self_attn = nn.Module()
-        self.self_attn.q_proj = nn.Linear(hidden_size, num_attention_heads * self.head_dim, bias=False)
-        self.self_attn.k_proj = nn.Linear(hidden_size, num_key_value_heads * self.head_dim, bias=False)
-        self.self_attn.v_proj = nn.Linear(hidden_size, num_key_value_heads * self.head_dim, bias=False)
-        self.self_attn.o_proj = nn.Linear(num_attention_heads * self.head_dim, hidden_size, bias=False)
+        self.self_attn.q_proj = nn.Linear(
+            hidden_size, num_attention_heads * self.head_dim, bias=False
+        )
+        self.self_attn.k_proj = nn.Linear(
+            hidden_size, num_key_value_heads * self.head_dim, bias=False
+        )
+        self.self_attn.v_proj = nn.Linear(
+            hidden_size, num_key_value_heads * self.head_dim, bias=False
+        )
+        self.self_attn.o_proj = nn.Linear(
+            num_attention_heads * self.head_dim, hidden_size, bias=False
+        )
 
         self.mlp = nn.Module()
         self.mlp.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.mlp.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.mlp.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
 
-        self.self_attn_layer_scale = Code2WavLayerScale(hidden_size, layer_scale_initial_scale)
-        self.mlp_layer_scale = Code2WavLayerScale(hidden_size, layer_scale_initial_scale)
+        self.self_attn_layer_scale = Code2WavLayerScale(
+            hidden_size, layer_scale_initial_scale
+        )
+        self.mlp_layer_scale = Code2WavLayerScale(
+            hidden_size, layer_scale_initial_scale
+        )
 
     def forward(
         self,
@@ -739,9 +791,15 @@ class Code2WavPreTransformerLayer(nn.Module):
         k = self.self_attn.k_proj(hidden_states)
         v = self.self_attn.v_proj(hidden_states)
 
-        q = q.view(batch_size, seq_len, self.num_attention_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch_size, seq_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        v = v.view(batch_size, seq_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        q = q.view(
+            batch_size, seq_len, self.num_attention_heads, self.head_dim
+        ).transpose(1, 2)
+        k = k.view(
+            batch_size, seq_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        v = v.view(
+            batch_size, seq_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
 
         if position_embeddings is not None:
             cos, sin = position_embeddings
@@ -752,8 +810,16 @@ class Code2WavPreTransformerLayer(nn.Module):
 
         if self.num_key_value_heads < self.num_attention_heads:
             n_rep = self.num_attention_heads // self.num_key_value_heads
-            k = k.unsqueeze(2).expand(-1, -1, n_rep, -1, -1).reshape(batch_size, self.num_attention_heads, seq_len, self.head_dim)
-            v = v.unsqueeze(2).expand(-1, -1, n_rep, -1, -1).reshape(batch_size, self.num_attention_heads, seq_len, self.head_dim)
+            k = (
+                k.unsqueeze(2)
+                .expand(-1, -1, n_rep, -1, -1)
+                .reshape(batch_size, self.num_attention_heads, seq_len, self.head_dim)
+            )
+            v = (
+                v.unsqueeze(2)
+                .expand(-1, -1, n_rep, -1, -1)
+                .reshape(batch_size, self.num_attention_heads, seq_len, self.head_dim)
+            )
 
         attn_output = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         attn_output = attn_output.transpose(1, 2).reshape(batch_size, seq_len, -1)
@@ -788,17 +854,19 @@ class Code2WavPreTransformer(nn.Module):
         rope_theta = config.get("rope_theta", 10000.0)
         head_dim = hidden_size // num_attention_heads
 
-        self.layers = nn.ModuleList([
-            Code2WavPreTransformerLayer(
-                hidden_size=hidden_size,
-                intermediate_size=intermediate_size,
-                num_attention_heads=num_attention_heads,
-                num_key_value_heads=num_key_value_heads,
-                rms_norm_eps=rms_norm_eps,
-                layer_scale_initial_scale=layer_scale_initial_scale,
-            )
-            for _ in range(num_hidden_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                Code2WavPreTransformerLayer(
+                    hidden_size=hidden_size,
+                    intermediate_size=intermediate_size,
+                    num_attention_heads=num_attention_heads,
+                    num_key_value_heads=num_key_value_heads,
+                    rms_norm_eps=rms_norm_eps,
+                    layer_scale_initial_scale=layer_scale_initial_scale,
+                )
+                for _ in range(num_hidden_layers)
+            ]
+        )
         self.norm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.rotary_emb = Code2WavRotaryEmbedding(
             dim=head_dim,
@@ -808,7 +876,11 @@ class Code2WavPreTransformer(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
-        position_ids = torch.arange(seq_len, device=hidden_states.device).unsqueeze(0).expand(batch_size, -1)
+        position_ids = (
+            torch.arange(seq_len, device=hidden_states.device)
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+        )
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         for layer in self.layers:
@@ -845,7 +917,9 @@ class CausalConv1d(nn.Module):
     def _get_extra_padding_for_conv1d(self, x: torch.Tensor) -> int:
         length = x.shape[-1]
         n_frames = (length - self.kernel_size + self.padding) / self.stride + 1
-        ideal_length = (math.ceil(n_frames) - 1) * self.stride + (self.kernel_size - self.padding)
+        ideal_length = (math.ceil(n_frames) - 1) * self.stride + (
+            self.kernel_size - self.padding
+        )
         return ideal_length - length
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -857,9 +931,13 @@ class CausalConv1d(nn.Module):
 class CausalTransConv1d(nn.Module):
     """Causal transposed 1D convolution for upsampling."""
 
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int):
+    def __init__(
+        self, in_channels: int, out_channels: int, kernel_size: int, stride: int
+    ):
         super().__init__()
-        self.conv = nn.ConvTranspose1d(in_channels, out_channels, kernel_size, stride=stride)
+        self.conv = nn.ConvTranspose1d(
+            in_channels, out_channels, kernel_size, stride=stride
+        )
         pad = kernel_size - stride
         self.left_pad = math.ceil(pad)
         self.right_pad = self.left_pad
@@ -918,13 +996,15 @@ class Code2WavDecoderBlock(nn.Module):
 
     def __init__(self, in_dim: int, out_dim: int, upsample_rate: int):
         super().__init__()
-        self.block = nn.ModuleList([
-            SnakeBeta(in_dim),
-            CausalTransConv1d(in_dim, out_dim, 2 * upsample_rate, upsample_rate),
-            Code2WavResidualUnit(out_dim, dilation=1),
-            Code2WavResidualUnit(out_dim, dilation=3),
-            Code2WavResidualUnit(out_dim, dilation=9),
-        ])
+        self.block = nn.ModuleList(
+            [
+                SnakeBeta(in_dim),
+                CausalTransConv1d(in_dim, out_dim, 2 * upsample_rate, upsample_rate),
+                Code2WavResidualUnit(out_dim, dilation=1),
+                Code2WavResidualUnit(out_dim, dilation=3),
+                Code2WavResidualUnit(out_dim, dilation=9),
+            ]
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for block in self.block:
@@ -1053,7 +1133,11 @@ class VisionPatchEmbed(nn.Module):
         self.embed_dim = int(config.get("hidden_size"))
         kernel_size = [self.temporal_patch_size, self.patch_size, self.patch_size]
         self.proj = nn.Conv3d(
-            self.in_channels, self.embed_dim, kernel_size=kernel_size, stride=kernel_size, bias=True
+            self.in_channels,
+            self.embed_dim,
+            kernel_size=kernel_size,
+            stride=kernel_size,
+            bias=True,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -1065,7 +1149,9 @@ class VisionPatchEmbed(nn.Module):
             self.patch_size,
             self.patch_size,
         )
-        hidden_states = self.proj(hidden_states.to(dtype=target_dtype)).view(-1, self.embed_dim)
+        hidden_states = self.proj(hidden_states.to(dtype=target_dtype)).view(
+            -1, self.embed_dim
+        )
         return hidden_states
 
 
@@ -1078,7 +1164,9 @@ class VisionRotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(self, seqlen: int) -> torch.Tensor:
-        seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        seq = torch.arange(
+            seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
+        )
         freqs = torch.outer(seq, self.inv_freq)
         return freqs
 

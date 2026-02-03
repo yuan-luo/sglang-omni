@@ -14,9 +14,9 @@ from sglang_omni.models.qwen3_omni.components.torch_common import (
     load_config_dict,
     strip_audio_config,
 )
+from sglang_omni.models.qwen3_omni.modeling import Qwen3OmniThinker as TorchThinker
+from sglang_omni.models.qwen3_omni.modeling import ThinkerOutput as TorchThinkerOutput
 from sglang_omni.models.qwen3_omni.modeling import (
-    ThinkerOutput as TorchThinkerOutput,
-    Qwen3OmniThinker as TorchThinker,
     _build_position_ids,
     _maybe_apply_causal_mask,
 )
@@ -94,8 +94,10 @@ class Qwen3OmniTorchThinker(nn.Module):
                     "Image placeholder count mismatch: "
                     f"tokens={token_count} embeds={image_embeds.shape[0]}"
                 )
-            image_mask = (input_ids == int(self.image_token_id)).unsqueeze(-1).expand_as(
-                inputs_embeds
+            image_mask = (
+                (input_ids == int(self.image_token_id))
+                .unsqueeze(-1)
+                .expand_as(inputs_embeds)
             )
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
@@ -106,8 +108,10 @@ class Qwen3OmniTorchThinker(nn.Module):
                     "Audio placeholder count mismatch: "
                     f"tokens={token_count} embeds={audio_embeds.shape[0]}"
                 )
-            audio_mask = (input_ids == int(self.audio_token_id)).unsqueeze(-1).expand_as(
-                inputs_embeds
+            audio_mask = (
+                (input_ids == int(self.audio_token_id))
+                .unsqueeze(-1)
+                .expand_as(inputs_embeds)
             )
             inputs_embeds = inputs_embeds.masked_scatter(audio_mask, audio_embeds)
 
@@ -166,7 +170,9 @@ class Qwen3OmniTorchThinker(nn.Module):
         if inputs_embeds is None:
             if input_ids is None:
                 raise ValueError("input_ids required to build inputs_embeds")
-            inputs_embeds = self.thinker.get_input_embeddings()(input_ids.to(self._device))
+            inputs_embeds = self.thinker.get_input_embeddings()(
+                input_ids.to(self._device)
+            )
 
         inputs_embeds = inputs_embeds.to(self._device)
         if input_ids is not None:
@@ -193,7 +199,9 @@ class Qwen3OmniTorchThinker(nn.Module):
                 visual_pos_masks = image_mask
 
         if feature_attention_mask is not None:
-            audio_feature_lengths = torch.sum(feature_attention_mask.to(self._device), dim=1)
+            audio_feature_lengths = torch.sum(
+                feature_attention_mask.to(self._device), dim=1
+            )
         if audio_feature_lengths is not None:
             audio_feature_lengths = audio_feature_lengths.to(self._device)
         if image_grid_thw is not None:
@@ -234,7 +242,11 @@ class Qwen3OmniTorchThinker(nn.Module):
                 if input_ids is None:
                     raise ValueError("input_ids required for cache position handling")
                 batch_size, seq_length = input_ids.shape
-                delta = cache_position[0] + self._rope_deltas if cache_position is not None else 0
+                delta = (
+                    cache_position[0] + self._rope_deltas
+                    if cache_position is not None
+                    else 0
+                )
                 position_ids = torch.arange(seq_length, device=input_ids.device)
                 position_ids = position_ids.view(1, -1).expand(batch_size, -1)
                 position_ids = position_ids.add(delta)
@@ -256,7 +268,9 @@ class Qwen3OmniTorchThinker(nn.Module):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
-            past_kv = past_key_values[layer_idx] if past_key_values is not None else None
+            past_kv = (
+                past_key_values[layer_idx] if past_key_values is not None else None
+            )
             hidden_states, new_kv = layer(
                 hidden_states,
                 attention_mask=attention_mask,

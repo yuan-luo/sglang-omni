@@ -44,7 +44,9 @@ def create_text_first_pipeline_config(
         else "sglang_omni.models.qwen3_omni.pipeline.stages.create_image_encoder_executor"
     )
     # Keep HF audio tower even in torch backend to preserve audio semantics.
-    audio_factory = "sglang_omni.models.qwen3_omni.pipeline.stages.create_audio_encoder_executor"
+    audio_factory = (
+        "sglang_omni.models.qwen3_omni.pipeline.stages.create_audio_encoder_executor"
+    )
     thinker_factory = (
         "sglang_omni.models.qwen3_omni.pipeline.stages.create_thinker_executor_torch"
         if use_torch
