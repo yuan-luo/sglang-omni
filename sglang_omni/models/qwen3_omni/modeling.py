@@ -25,6 +25,7 @@ from .modules import (
     DecoderLayer,
     MoeDecoderLayer,
     MRoPE,
+    RMSNorm,
     SinusoidsPositionEmbedding,
     SnakeBeta,
     VisionBlock,
@@ -499,7 +500,7 @@ class Qwen3OmniThinker(nn.Module):
             )
             for _ in range(self.num_hidden_layers)
         ])
-        self.norm = nn.RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
+        self.norm = RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
         self.lm_head = nn.Linear(self.hidden_size, self.vocab_size, bias=False)
 
         rope_scaling = text_config.get("rope_scaling", {})
@@ -658,7 +659,7 @@ class TalkerCodePredictor(nn.Module):
             )
             for _ in range(self.num_hidden_layers)
         ])
-        self.norm = nn.RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
+        self.norm = RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
         self.rotary_emb = MRoPE(
             dim=self.head_dim,
             max_position_embeddings=self.max_position_embeddings,
@@ -790,7 +791,7 @@ class Qwen3OmniTalker(nn.Module):
             )
             for _ in range(self.num_hidden_layers)
         ])
-        self.norm = nn.RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
+        self.norm = RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
         self.codec_head = nn.Linear(self.hidden_size, self.vocab_size, bias=False)
         self.rotary_emb = MRoPE(
             dim=self.head_dim,

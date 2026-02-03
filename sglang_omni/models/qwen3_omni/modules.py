@@ -11,6 +11,33 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# ---- RMSNorm (HF-compatible) ----
+
+
+class RMSNorm(nn.Module):
+    """RMSNorm matching HF's manual implementation.
+
+    PyTorch's ``nn.RMSNorm`` uses a fused CUDA kernel whose parallel
+    reduction order differs from the simple Python loop used by HF
+    (``hidden.to(float32).pow(2).mean(-1)``).  The difference is ~1e-3
+    per element in bf16, which compounds through 48 MoE layers.
+    """
+
+    def __init__(self, hidden_size: int | tuple[int, ...], eps: float = 1e-6):
+        super().__init__()
+        if isinstance(hidden_size, int):
+            hidden_size = (hidden_size,)
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
+
+
 # ---- Position Embeddings ----
 
 
@@ -159,8 +186,8 @@ class Attention(nn.Module):
 
         self.use_qk_norm = use_qk_norm
         if use_qk_norm:
-            self.q_norm = nn.RMSNorm(self.head_dim, eps=rms_norm_eps)
-            self.k_norm = nn.RMSNorm(self.head_dim, eps=rms_norm_eps)
+            self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+            self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
     def forward(
         self,
@@ -176,13 +203,16 @@ class Attention(nn.Module):
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
 
-        q = q.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = v.view(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        q = q.view(bsz, q_len, self.num_heads, self.head_dim)
+        k = k.view(bsz, q_len, self.num_kv_heads, self.head_dim)
 
         if self.use_qk_norm:
             q = self.q_norm(q)
             k = self.k_norm(k)
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.view(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
         if position_embeddings is not None:
             cos, sin = position_embeddings
@@ -195,7 +225,7 @@ class Attention(nn.Module):
         if use_cache:
             past_key_value = (k, v)
 
-        is_causal = attention_mask is None and past_key_value is None
+        is_causal = attention_mask is None and q_len > 1
         attn_output = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attention_mask,
@@ -232,7 +262,7 @@ class MLP(nn.Module):
 
 
 class MoeExperts(nn.Module):
-    """Fused MoE experts matching HF's gate_up_proj layout."""
+    """Fused MoE experts using grouped_mm to match HF's default behavior."""
 
     def __init__(
         self,
@@ -280,29 +310,59 @@ class MoeExperts(nn.Module):
         top_k_index: torch.Tensor,
         top_k_weights: torch.Tensor,
     ) -> torch.Tensor:
-        final_hidden_states = torch.zeros_like(hidden_states)
+        device = hidden_states.device
+        num_top_k = top_k_index.size(-1)
+        num_tokens = hidden_states.size(0)
+        hidden_dim = hidden_states.size(-1)
 
-        with torch.no_grad():
-            expert_mask = F.one_hot(top_k_index, num_classes=self.num_experts)
-            expert_mask = expert_mask.permute(2, 1, 0)
-            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+        # Flatten top_k indices and expand token indices
+        expert_ids = top_k_index.reshape(-1)
+        token_idx = (
+            torch.arange(num_tokens, device=device)
+            .unsqueeze(1)
+            .expand(-1, num_top_k)
+            .reshape(-1)
+        )
+        sample_weights = top_k_weights.reshape(-1, 1)
 
-        for expert_idx in expert_hit:
-            expert_idx = expert_idx[0]
-            if expert_idx == self.num_experts:
-                continue
-            top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
-            current_state = hidden_states[token_idx]
+        # Gather hidden states for each (token, expert) pair
+        selected_hidden = hidden_states[token_idx]
 
-            gate, up = F.linear(current_state, self.gate_up_proj[expert_idx]).chunk(2, dim=-1)
-            current_hidden = self.act_fn(gate) * up
-            current_hidden = F.linear(current_hidden, self.down_proj[expert_idx])
-            current_hidden = current_hidden * top_k_weights[token_idx, top_k_pos, None]
-            final_hidden_states.index_add_(
-                0, token_idx, current_hidden.to(final_hidden_states.dtype)
-            )
+        # Sort by expert for grouped processing
+        perm = torch.argsort(expert_ids)
+        inv_perm = torch.argsort(perm)
+        expert_ids_g = expert_ids[perm]
+        sample_weights_g = sample_weights[perm]
+        selected_hidden_g = selected_hidden[perm]
 
-        return final_hidden_states
+        # Compute per-expert token counts and cumulative offsets
+        num_per_expert = torch.histc(
+            expert_ids_g.float(), bins=self.num_experts, min=0,
+            max=self.num_experts - 1,
+        )
+        offsets = torch.cumsum(num_per_expert, dim=0, dtype=torch.int32)
+
+        # Gate+up projection via grouped_mm
+        gate_up_out = torch._grouped_mm(
+            selected_hidden_g, self.gate_up_proj.transpose(-2, -1), offs=offsets
+        )
+
+        # Gating: SiLU(gate) * up
+        gate, up = gate_up_out.chunk(2, dim=-1)
+        gated = self.act_fn(gate) * up
+
+        # Down projection via grouped_mm
+        out_g = torch._grouped_mm(
+            gated, self.down_proj.transpose(-2, -1), offs=offsets
+        )
+
+        # Apply routing weights and restore original order
+        out_g = out_g * sample_weights_g
+        out = out_g[inv_perm]
+
+        # Deterministic accumulation via reshape+sum
+        final_hidden_states = out.view(num_tokens, num_top_k, hidden_dim).sum(dim=1)
+        return final_hidden_states.to(hidden_states.dtype)
 
 
 class TopKRouter(nn.Module):
@@ -327,7 +387,7 @@ class TopKRouter(nn.Module):
         router_logits = F.linear(hidden_states, self.weight)
         routing_weights = F.softmax(router_logits, dim=-1, dtype=torch.float32)
         top_k_weights, top_k_index = torch.topk(
-            routing_weights, self.top_k, dim=-1, sorted=False
+            routing_weights, self.top_k, dim=-1, sorted=True
         )
         if self.norm_topk_prob:
             top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
@@ -420,8 +480,8 @@ class DecoderLayer(nn.Module):
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
         )
-        self.input_layernorm = nn.RMSNorm(hidden_size, eps=rms_norm_eps)
-        self.post_attention_layernorm = nn.RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
 
     def forward(
         self,
@@ -486,8 +546,8 @@ class MoeDecoderLayer(nn.Module):
             hidden_act=hidden_act,
             norm_topk_prob=norm_topk_prob,
         )
-        self.input_layernorm = nn.RMSNorm(hidden_size, eps=rms_norm_eps)
-        self.post_attention_layernorm = nn.RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
 
     def forward(
         self,
@@ -649,8 +709,8 @@ class Code2WavPreTransformerLayer(nn.Module):
         self.num_key_value_heads = num_key_value_heads
         self.head_dim = hidden_size // num_attention_heads
 
-        self.input_layernorm = nn.RMSNorm(hidden_size, eps=rms_norm_eps)
-        self.post_attention_layernorm = nn.RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
 
         self.self_attn = nn.Module()
         self.self_attn.q_proj = nn.Linear(hidden_size, num_attention_heads * self.head_dim, bias=False)
@@ -739,7 +799,7 @@ class Code2WavPreTransformer(nn.Module):
             )
             for _ in range(num_hidden_layers)
         ])
-        self.norm = nn.RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.norm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.rotary_emb = Code2WavRotaryEmbedding(
             dim=head_dim,
             max_position_embeddings=max_position_embeddings,

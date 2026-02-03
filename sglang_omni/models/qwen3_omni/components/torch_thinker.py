@@ -68,6 +68,8 @@ class Qwen3OmniTorchThinker(nn.Module):
         )
         state_dict.update({f"lm_head.{k}": v for k, v in lm_head_dict.items()})
         self.thinker.load_state_dict(state_dict, strict=True, assign=True)
+        del state_dict, lm_head_dict
+        torch.cuda.empty_cache()
         if torch_dtype is not None:
             self.thinker = self.thinker.to(dtype=torch_dtype)
         self.thinker = self.thinker.to(self._device)
