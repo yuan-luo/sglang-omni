@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from sglang_omni.config.imports import import_string
+from sglang_omni.utils import import_string
 from sglang_omni.config.schema import (
     ExecutorConfig,
     InputHandlerConfig,
