@@ -20,4 +20,3 @@ RUN git clone https://github.com/openucx/ucx.git \
     && make -j \
     && make -j install-strip \
     && ldconfig
-
