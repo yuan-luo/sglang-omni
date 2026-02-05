@@ -33,6 +33,12 @@ def create_text_first_pipeline_config(
     relay_type: str = "shm",
     fused_stages: list[list[str]] | None = None,
 ) -> PipelineConfig:
+    """Create a text-first pipeline configuration for Qwen3-Omni.
+
+    CPU/GPU overlap is automatically enabled via FrontendExecutor's thread pool
+    and EngineExecutor's wait_result parameter. No special overlap executor needed.
+    """
+
     def _relay(device: str) -> RelayConfig:
         return RelayConfig(type=relay_type, device=device)
 
