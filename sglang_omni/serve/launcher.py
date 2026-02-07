@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 _BUILTIN_PIPELINES: dict[str, str] = {
     "qwen3-omni": "sglang_omni.models.qwen3_omni.create_text_first_pipeline_config",
+    "qwen3-tts": "sglang_omni.models.qwen3_tts.create_tts_pipeline_config",
 }
 
 
@@ -244,6 +245,17 @@ examples:
         choices=["shm", "nccl", "nixl"],
     )
 
+    # --- TTS-specific args (used with --pipeline qwen3-tts) ---
+    parser.add_argument("--talker-device", type=str, default=None)
+    parser.add_argument("--code-predictor-device", type=str, default=None)
+    parser.add_argument("--codec-decoder-device", type=str, default=None)
+    parser.add_argument(
+        "--num-code-predictor-workers",
+        type=int,
+        default=None,
+        help="Number of code-predictor (MTP) workers for 1:N fan-out.",
+    )
+
     # --- Export instead of serve ---
     parser.add_argument(
         "--export-config",
@@ -305,6 +317,10 @@ examples:
             "thinker_device",
             "thinker_max_seq_len",
             "relay_type",
+            "talker_device",
+            "code_predictor_device",
+            "codec_decoder_device",
+            "num_code_predictor_workers",
         ):
             val = getattr(args, key, None)
             if val is not None:
