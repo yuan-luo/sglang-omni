@@ -90,6 +90,7 @@ def run_template_stage(model_id: str) -> None:
 
     def processor(payload: StagePayload) -> StagePayload:
         print(f"{tokenizer=}")
+        print(f"{model_id=}")
         messages = payload.request.inputs
         if not isinstance(messages, list):
             raise ValueError("Template stage expects a list of messages")
