@@ -8,16 +8,17 @@ waveform via the speech tokenizer bundled with the model.
 from __future__ import annotations
 
 import logging
-from typing import Any
+import os
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
 
-class CodecDecoderComponent:
-    """Load the speech tokenizer and decode codec tokens to audio."""
+class CodecDecoderComponent(nn.Module):
+    """Speech tokenizer wrapper that decodes codec tokens to audio."""
 
     def __init__(
         self,
@@ -26,19 +27,17 @@ class CodecDecoderComponent:
         device: str = "cuda",
         dtype: str | None = None,
     ) -> None:
-        from qwen_tts.inference.qwen3_tts_tokenizer import Qwen3TTSTokenizer
-        from transformers import AutoConfig
+        super().__init__()
 
-        # Resolve the speech_tokenizer sub-directory.
+        from qwen_tts.inference.qwen3_tts_tokenizer import Qwen3TTSTokenizer
         from transformers.utils.hub import cached_file
 
+        # Resolve the speech_tokenizer sub-directory.
         speech_tok_cfg = cached_file(model_id, "speech_tokenizer/config.json")
         if speech_tok_cfg is None:
             raise FileNotFoundError(
                 f"Could not find speech_tokenizer/config.json in {model_id}"
             )
-        import os
-
         speech_tok_dir = os.path.dirname(speech_tok_cfg)
 
         torch_dtype = _resolve_dtype(dtype)
@@ -47,7 +46,11 @@ class CodecDecoderComponent:
             torch_dtype=torch_dtype,
             device_map=device,
         )
-        self.device = torch.device(device)
+
+        # Register the underlying nn.Module so parameters() works.
+        self.decoder_model = self.tokenizer.model
+
+        self._device = torch.device(device)
 
     @torch.inference_mode()
     def decode(self, all_codes: torch.Tensor) -> tuple[np.ndarray, int]:

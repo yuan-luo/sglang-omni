@@ -143,24 +143,42 @@ def load_weights_by_prefix(
     model_id: str,
     *,
     prefix: str | tuple[str, ...] | list[str],
+    exclude: str | tuple[str, ...] | list[str] | None = None,
     local_files_only: bool = False,
 ) -> dict[str, torch.Tensor]:
-    """Load weights matching one of the prefixes, stripping the matched prefix."""
+    """Load weights matching one of the prefixes, stripping the matched prefix.
+
+    Parameters
+    ----------
+    exclude : optional
+        After loading, drop any key whose *original* name (before prefix
+        stripping) starts with one of these prefixes.  Useful for loading
+        ``talker.*`` while skipping ``talker.code_predictor.*``.
+    """
     model_path = resolve_model_path(model_id, local_files_only=local_files_only)
     prefixes = _normalize_prefixes(prefix)
+    exclude_prefixes = _normalize_prefixes(exclude) if exclude else ()
 
     for prefix_item in prefixes:
         state_dict = _load_safetensors_sharded(model_path, prefix_item)
+        if not state_dict:
+            state_dict = _load_safetensors_single(model_path, prefix_item)
+        if not state_dict:
+            state_dict = _load_bin_sharded(model_path, prefix_item)
+        if not state_dict:
+            state_dict = _load_bin_single(model_path, prefix_item)
         if state_dict:
-            return state_dict
-        state_dict = _load_safetensors_single(model_path, prefix_item)
-        if state_dict:
-            return state_dict
-        state_dict = _load_bin_sharded(model_path, prefix_item)
-        if state_dict:
-            return state_dict
-        state_dict = _load_bin_single(model_path, prefix_item)
-        if state_dict:
+            if exclude_prefixes:
+                # Keys are already stripped of prefix_item; reconstruct
+                # original key to test against exclude prefixes.
+                state_dict = {
+                    k: v
+                    for k, v in state_dict.items()
+                    if not any(
+                        (prefix_item + k).startswith(ep)
+                        for ep in exclude_prefixes
+                    )
+                }
             return state_dict
 
     raise FileNotFoundError(
@@ -173,6 +191,7 @@ def load_module(
     model_id: str,
     *,
     prefix: str | tuple[str, ...] | list[str],
+    exclude: str | tuple[str, ...] | list[str] | None = None,
     dtype: torch.dtype | None = None,
     device: str | torch.device | None = None,
     strict: bool = True,
@@ -182,6 +201,7 @@ def load_module(
     state_dict = load_weights_by_prefix(
         model_id,
         prefix=prefix,
+        exclude=exclude,
         local_files_only=local_files_only,
     )
     module.load_state_dict(state_dict, strict=strict)

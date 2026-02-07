@@ -12,15 +12,73 @@ import logging
 from typing import Any
 
 import torch
+import torch.nn as nn
+from transformers.modeling_utils import no_init_weights
+
+from sglang_omni.models.utils.hf import load_hf_config
+from sglang_omni.models.weight_loader import load_module, resolve_dtype
 
 logger = logging.getLogger(__name__)
 
+# Weight prefixes in the HF checkpoint.
+_CODE_PREDICTOR_PREFIX = "talker.code_predictor."
+_TALKER_CODEC_EMBED_PREFIX = "talker.model.codec_embedding."
 
-class CodePredictorComponent:
-    """Load the code-predictor sub-model and run AR generation for codebooks 2–N.
 
-    The code predictor has its own 5-layer transformer, separate per-codebook
-    embeddings, a ``small_to_mtp_projection`` and per-codebook ``lm_head``s.
+def _load_code_predictor(
+    model_id: str,
+    *,
+    torch_dtype: torch.dtype | None,
+    device: str,
+) -> nn.Module:
+    """Instantiate ``Qwen3TTSTalkerCodePredictorModelForConditionalGeneration``
+    and load only code-predictor weights."""
+    from qwen_tts.core.models.configuration_qwen3_tts import Qwen3TTSConfig
+    from qwen_tts.core.models.modeling_qwen3_tts import (
+        Qwen3TTSTalkerCodePredictorModelForConditionalGeneration,
+    )
+
+    cfg: Qwen3TTSConfig = load_hf_config(model_id)
+    talker_cfg = cfg.talker_config
+    cp_cfg = talker_cfg.code_predictor_config
+
+    with no_init_weights():
+        code_predictor = Qwen3TTSTalkerCodePredictorModelForConditionalGeneration(
+            config=cp_cfg, talker_config=talker_cfg
+        )
+
+    return load_module(
+        code_predictor,
+        model_id,
+        prefix=_CODE_PREDICTOR_PREFIX,
+        dtype=torch_dtype,
+        device=device,
+    )
+
+
+def _load_talker_codec_embedding(
+    model_id: str,
+    talker_cfg: Any,
+    *,
+    torch_dtype: torch.dtype | None,
+    device: str,
+) -> nn.Embedding:
+    """Load the talker's codec embedding (used to embed the first codebook token)."""
+    embedding = nn.Embedding(talker_cfg.vocab_size, talker_cfg.hidden_size)
+    return load_module(
+        embedding,
+        model_id,
+        prefix=_TALKER_CODEC_EMBED_PREFIX,
+        dtype=torch_dtype,
+        device=device,
+    )
+
+
+class CodePredictorComponent(nn.Module):
+    """Code-predictor (MTP) sub-model for codebooks 2-N.
+
+    Has its own 5-layer transformer, per-codebook embeddings,
+    ``small_to_mtp_projection`` and per-codebook ``lm_head``s.
     """
 
     def __init__(
@@ -30,37 +88,22 @@ class CodePredictorComponent:
         device: str = "cuda",
         dtype: str | None = None,
     ) -> None:
-        torch_dtype = _resolve_dtype(dtype)
+        super().__init__()
+        torch_dtype = resolve_dtype(dtype)
 
-        from qwen_tts.core.models import (
-            Qwen3TTSConfig,
-            Qwen3TTSForConditionalGeneration,
-        )
-        from transformers import AutoConfig, AutoModel
-
-        AutoConfig.register("qwen3_tts", Qwen3TTSConfig)
-        AutoModel.register(Qwen3TTSConfig, Qwen3TTSForConditionalGeneration)
-
-        full_model: Qwen3TTSForConditionalGeneration = AutoModel.from_pretrained(
-            model_id,
-            torch_dtype=torch_dtype,
-            device_map=device,
-        )
-
-        talker_cfg = full_model.config.talker_config
+        cfg: Any = load_hf_config(model_id)
+        talker_cfg = cfg.talker_config
         self.num_code_groups: int = talker_cfg.num_code_groups
 
-        # Extract code_predictor and the talker's codec_embedding (needed for
-        # first-codebook embedding to compute sum_embedding).
-        self.code_predictor = full_model.talker.code_predictor
-        self.talker_codec_embedding = full_model.talker.model.codec_embedding
+        self.code_predictor = _load_code_predictor(
+            model_id, torch_dtype=torch_dtype, device=device
+        )
+        self.talker_codec_embedding = _load_talker_codec_embedding(
+            model_id, talker_cfg, torch_dtype=torch_dtype, device=device
+        )
 
-        # Free everything else
-        del full_model
-        torch.cuda.empty_cache()
-
-        self.device = torch.device(device)
-        self.dtype = next(self.code_predictor.parameters()).dtype
+        self._device = torch.device(device)
+        self._dtype = torch_dtype or torch.bfloat16
 
     # ------------------------------------------------------------------
     # Generate
@@ -90,11 +133,11 @@ class CodePredictorComponent:
             ``sum_embedding`` : torch.Tensor (1, 1, D) — sum of all codebook embeddings.
             ``codec_ids`` : torch.Tensor (num_code_groups,) — all codec token IDs.
         """
-        past_hidden = past_hidden.to(self.device, dtype=self.dtype)
+        past_hidden = past_hidden.to(self._device, dtype=self._dtype)
 
         # Embed first token with the talker's codec embedding
         first_id_tensor = torch.tensor(
-            [[first_token_id]], device=self.device, dtype=torch.long
+            [[first_token_id]], device=self._device, dtype=torch.long
         )
         last_id_hidden = self.talker_codec_embedding(first_id_tensor)  # (1, 1, D)
 
@@ -124,7 +167,7 @@ class CodePredictorComponent:
         for step in range(1, self.num_code_groups - 1):
             # Embed the just-generated token with the step-specific embedding
             token_tensor = torch.tensor(
-                [[token_id]], device=self.device, dtype=torch.long
+                [[token_id]], device=self._device, dtype=torch.long
             )
             step_embed = self.code_predictor.model.codec_embedding[step - 1](
                 token_tensor
@@ -155,7 +198,7 @@ class CodePredictorComponent:
         sum_emb = last_id_hidden  # (1, 1, D)
         for i, gid in enumerate(generated_ids):
             gid_tensor = torch.tensor(
-                [[gid]], device=self.device, dtype=torch.long
+                [[gid]], device=self._device, dtype=torch.long
             )
             emb = self.code_predictor.model.codec_embedding[i](gid_tensor)
             sum_emb = sum_emb + emb
@@ -195,14 +238,3 @@ class CodePredictorComponent:
 
         probs = logits.softmax(dim=-1)
         return int(torch.multinomial(probs, num_samples=1).item())
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _resolve_dtype(dtype: str | None) -> torch.dtype:
-    if dtype is None:
-        return torch.bfloat16
-    return getattr(torch, dtype, torch.bfloat16)
