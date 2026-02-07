@@ -89,7 +89,7 @@ def run_template_stage(model_id: str) -> None:
     tokenizer = AutoTokenizer.from_pretrained(model_id)
 
     def processor(payload: StagePayload) -> StagePayload:
-        logger.info(f"{tokenizer=}")
+        print(f"{tokenizer=}")
         messages = payload.request.inputs
         if not isinstance(messages, list):
             raise ValueError("Template stage expects a list of messages")
