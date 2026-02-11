@@ -37,9 +37,7 @@ def event_to_dict(event: OmniEvent) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
 # Aggregate (identity)
-# ---------------------------------------------------------------------------
 
 
 def create_aggregate_executor() -> PreprocessingExecutor:
@@ -55,9 +53,7 @@ def create_aggregate_executor() -> PreprocessingExecutor:
     return PreprocessingExecutor(_identity)
 
 
-# ---------------------------------------------------------------------------
 # Encoder
-# ---------------------------------------------------------------------------
 
 
 def create_encoder_executor(
@@ -91,9 +87,7 @@ def create_encoder_executor(
     )
 
 
-# ---------------------------------------------------------------------------
 # Thinker (autoregressive LLM)
-# ---------------------------------------------------------------------------
 
 
 def create_thinker_executor(
@@ -188,9 +182,7 @@ def create_thinker_executor(
     )
 
 
-# ---------------------------------------------------------------------------
 # Decode (post-thinker event extraction)
-# ---------------------------------------------------------------------------
 
 
 def create_decode_executor(

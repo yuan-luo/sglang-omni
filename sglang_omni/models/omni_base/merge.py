@@ -9,32 +9,22 @@ import torch
 
 from sglang_omni.proto import StagePayload
 
-# ==============================================================================
 # Tensor utilities
-# ==============================================================================
 
 
 def as_tensor(value: Any, dtype: torch.dtype | None = None) -> torch.Tensor | None:
-    """Convert value to tensor, avoiding unnecessary dtype conversions.
-
-    Performance optimizations:
-    - Only convert dtype if needed (avoid .to() when dtype matches)
-    - Use explicit type checks instead of try-except for better performance
-    """
+    """Convert value to tensor, avoiding unnecessary dtype conversions."""
     if value is None:
         return None
 
     if isinstance(value, torch.Tensor):
-        # Only convert if dtype differs to avoid unnecessary GPU operations
         if dtype is not None and value.dtype != dtype:
             return value.to(dtype=dtype)
         return value
 
-    # Explicit type checking for supported types (faster than try-except)
     if isinstance(value, (list, tuple, int, float, bool)):
         return torch.as_tensor(value, dtype=dtype)
 
-    # Try numpy arrays and other array-like objects
     if hasattr(value, "__array__"):
         try:
             return torch.as_tensor(value, dtype=dtype)
@@ -61,9 +51,7 @@ def is_non_empty(tensor: torch.Tensor | None) -> bool:
     return isinstance(tensor, torch.Tensor) and tensor.numel() > 0
 
 
-# ==============================================================================
 # Merge strategies
-# ==============================================================================
 
 
 def create_standard_merge_fn(
@@ -119,21 +107,3 @@ def create_standard_merge_fn(
         return base
 
     return merge_fn
-
-
-def default_build_thinker_inputs(
-    payload: StagePayload,
-    encoder_outs: dict[str, Any],
-) -> dict[str, Any]:
-    """Default thinker input builder (simple passthrough).
-
-    Most models will need to override this with their own logic.
-    """
-    model_inputs: dict[str, Any] = {}
-
-    # Simple aggregation: pass all encoder outputs as-is
-    for stage_name, stage_out in encoder_outs.items():
-        if isinstance(stage_out, dict):
-            model_inputs.update(stage_out)
-
-    return {"model_inputs": model_inputs}

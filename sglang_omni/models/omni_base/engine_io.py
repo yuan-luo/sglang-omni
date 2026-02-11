@@ -12,6 +12,13 @@ from sglang_omni.models.omni_base.types import ThinkerOutput
 from sglang_omni.proto import StagePayload
 
 
+def _ensure_engine_outputs(payload: StagePayload) -> dict[str, Any]:
+    """Ensure engine_outputs dict exists and return it."""
+    if payload.engine_outputs is None:
+        payload.engine_outputs = {}
+    return payload.engine_outputs
+
+
 def build_encoder_request(
     payload: StagePayload, *, stage_name: str
 ) -> EncoderRequestData:
@@ -44,23 +51,16 @@ def apply_encoder_result(
 ) -> None:
     """Apply encoder result to payload."""
     if isinstance(result, EncoderRequestData):
-        if result.output_dict is not None:
-            encoder_out = result.output_dict
-        elif result.embeddings is not None:
-            encoder_out = result.embeddings
-        else:
-            encoder_out = {}
+        encoder_out = result.output_dict or result.embeddings or {}
     else:
         encoder_out = result if isinstance(result, dict) else {"result": result}
 
     # Lazy initialization
     if payload.encoder_outs is None:
         payload.encoder_outs = {}
-    if payload.engine_outputs is None:
-        payload.engine_outputs = {}
 
     payload.encoder_outs[stage_name] = encoder_out
-    payload.engine_outputs[stage_name] = encoder_out
+    _ensure_engine_outputs(payload)[stage_name] = encoder_out
 
 
 def build_thinker_request(
@@ -126,10 +126,6 @@ def apply_thinker_result(
         }
 
     payload.thinker_out = thinker_out
-
-    # Lazy initialization for engine_outputs
-    if payload.engine_outputs is None:
-        payload.engine_outputs = {}
-    payload.engine_outputs[stage_name] = thinker_out
+    _ensure_engine_outputs(payload)[stage_name] = thinker_out
 
     return thinker_out

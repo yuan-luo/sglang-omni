@@ -26,10 +26,6 @@ class StageSpec(TypedDict, total=False):
     num_workers: int
 
 
-def _relay(*, relay_type: str, device: str) -> RelayConfig:
-    return RelayConfig(type=relay_type, device=device)
-
-
 def create_omni_pipeline_config(
     *,
     name: str,
@@ -51,8 +47,8 @@ def create_omni_pipeline_config(
                 ),
                 get_next=spec["get_next"],
                 input_handler=InputHandlerConfig(**spec.get("input_handler", {})),
-                relay=_relay(
-                    relay_type=relay_type,
+                relay=RelayConfig(
+                    type=relay_type,
                     device=spec.get("relay_device", "cpu"),
                 ),
                 num_workers=int(spec.get("num_workers", 1)),
