@@ -38,6 +38,7 @@ from sglang_omni.serve.openai_api import create_app
 from sglang_omni.utils import import_string
 
 logger = logging.getLogger(__name__)
+DEFAULT_BUILTIN_PIPELINE = "qwen3-omni"
 
 # ---------------------------------------------------------------------------
 # Built-in pipeline registry
@@ -204,13 +205,16 @@ examples:
   # Built-in pipeline (no JSON needed)
   sglang-omni-server --pipeline qwen3-omni --model-id Qwen/Qwen3-Omni-30B-A3B-Instruct
 
+  # Omit --pipeline to use default built-in pipeline (qwen3-omni)
+  sglang-omni-server --model-id Qwen/Qwen3-Omni-30B-A3B-Instruct
+
   # Export config to JSON for inspection / editing
   sglang-omni-server --pipeline qwen3-omni --model-id ... --export-config pipeline.json
 """,
     )
 
     # --- Source: pick one ---
-    source = parser.add_mutually_exclusive_group(required=True)
+    source = parser.add_mutually_exclusive_group(required=False)
     source.add_argument(
         "--config",
         type=str,
@@ -219,8 +223,9 @@ examples:
     source.add_argument(
         "--pipeline",
         type=str,
+        default=DEFAULT_BUILTIN_PIPELINE,
         choices=sorted(_BUILTIN_PIPELINES),
-        help="Name of a built-in pipeline.",
+        help=f"Name of a built-in pipeline (default: {DEFAULT_BUILTIN_PIPELINE}).",
     )
 
     # --- Pipeline factory args (used with --pipeline) ---
@@ -291,6 +296,7 @@ examples:
         config = load_pipeline_config(args.config)
     else:
         # --pipeline mode
+        pipeline_name = args.pipeline or DEFAULT_BUILTIN_PIPELINE
         if not args.model_id:
             parser.error("--model-id is required when using --pipeline")
 
@@ -310,7 +316,7 @@ examples:
                 factory_kwargs[key] = val
 
         config = _resolve_builtin(
-            args.pipeline,
+            pipeline_name,
             model_id=args.model_id,
             extra_kwargs=factory_kwargs,
         )
