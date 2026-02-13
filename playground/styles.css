@@ -137,11 +137,6 @@ body {
   justify-content: flex-start;
   position: relative;
 }
-.io-section.container-fs {
-  min-height: 220px;
-  max-height: 320px;
-  height: 260px;
-}
 .io-header { font-weight: 600; font-size: 14px; margin-bottom: 10px; width: 100%; }
 .io-section.audio .io-header { text-align: left; }
 .io-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -300,6 +295,63 @@ body {
   background: var(--primary-weak);
   border-color: var(--primary);
   color: var(--primary);
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+}
+.modal-card {
+  position: relative;
+  width: min(900px, 94vw);
+  max-height: 86vh;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.25);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding: 12px 16px;
+}
+.modal-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+.modal-close {
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: var(--radius-sm);
+  width: 30px;
+  height: 30px;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+.modal-body {
+  padding: 14px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  min-height: 280px;
+}
+.modal .fs-list {
+  max-height: 56vh;
 }
 
 .visualizer {

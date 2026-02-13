@@ -103,23 +103,6 @@
           <div class="preview-grid" id="image-previews"></div>
         </div>
 
-        <div class="io-section container-fs">
-          <div class="io-header">Container Files</div>
-          <div class="fs-controls">
-            <input
-              id="fs-path"
-              class="fs-path-input"
-              type="text"
-              value="/sgl-workspace/sglang"
-              placeholder="Container path"
-            />
-            <button type="button" id="fs-refresh" class="pill pill-ghost">Browse</button>
-          </div>
-          <div id="fs-current" class="fs-current"></div>
-          <div id="fs-error" class="fs-error hidden"></div>
-          <div id="fs-list" class="fs-list"></div>
-        </div>
-
         <label class="prompt-label" for="user-prompt">User Prompt</label>
         <textarea id="user-prompt" rows="3" placeholder="Enter your question or instruction..."></textarea>
 
@@ -138,6 +121,31 @@
           <div class="messages" id="messages"></div>
         </div>
       </section>
+    </div>
+  </div>
+
+  <div id="fs-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="fs-modal-title">
+    <div class="modal-backdrop" id="fs-modal-backdrop"></div>
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="fs-modal-title">Server files</h2>
+        <button type="button" id="fs-modal-close" class="modal-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="fs-controls">
+          <input
+            id="fs-path"
+            class="fs-path-input"
+            type="text"
+            value="/sgl-workspace/sglang"
+            placeholder="Container path"
+          />
+          <button type="button" id="fs-refresh" class="pill pill-ghost">Browse</button>
+        </div>
+        <div id="fs-current" class="fs-current"></div>
+        <div id="fs-error" class="fs-error hidden"></div>
+        <div id="fs-list" class="fs-list"></div>
+      </div>
     </div>
   </div>
   <script src="app.js"></script>

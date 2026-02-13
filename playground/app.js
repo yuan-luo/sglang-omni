@@ -57,6 +57,10 @@
   const fsCurrentEl = $("fs-current");
   const fsErrorEl = $("fs-error");
   const fsListEl = $("fs-list");
+  const fsModal = $("fs-modal");
+  const fsModalBackdrop = $("fs-modal-backdrop");
+  const fsModalCloseBtn = $("fs-modal-close");
+  const fsModalTitle = $("fs-modal-title");
 
   const sendBtn = $("send-btn");
   const stopBtn = $("stop-btn");
@@ -88,6 +92,24 @@
     vizAnim: 0,
     fsMode: "all",
   };
+
+  function openFsModal(mode) {
+    state.fsMode = mode || "all";
+    if (fsModalTitle) {
+      fsModalTitle.textContent = state.fsMode === "audio"
+        ? "Select audio from server"
+        : state.fsMode === "media"
+        ? "Select image/video from server"
+        : "Select file from server";
+    }
+    if (fsPathInput) fsPathInput.value = defaultFsRoot;
+    if (fsModal) fsModal.classList.remove("hidden");
+    loadContainerFiles(defaultFsRoot);
+  }
+
+  function closeFsModal() {
+    if (fsModal) fsModal.classList.add("hidden");
+  }
 
   function getPrimaryVideo() {
     if (state.webcamVideos.length > 0) {
@@ -264,7 +286,10 @@
         action.addEventListener("click", () => loadContainerFiles(entry.path));
       } else if (kind === "audio" || kind === "image" || kind === "video") {
         action.textContent = "Use";
-        action.addEventListener("click", () => addContainerFile(entry.path, kind));
+        action.addEventListener("click", () => {
+          addContainerFile(entry.path, kind);
+          closeFsModal();
+        });
       } else {
         action.textContent = "Skip";
         action.disabled = true;
@@ -980,7 +1005,6 @@
 
   if (fsRefreshBtn) {
     fsRefreshBtn.addEventListener("click", () => {
-      state.fsMode = "all";
       loadContainerFiles(fsPathInput ? fsPathInput.value : "");
     });
   }
@@ -988,28 +1012,34 @@
     fsPathInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        state.fsMode = "all";
         loadContainerFiles(fsPathInput.value);
       }
     });
-    loadContainerFiles(fsPathInput.value);
   }
 
   if (audioServerBtn) {
     audioServerBtn.addEventListener("click", () => {
-      state.fsMode = "audio";
-      if (fsPathInput) fsPathInput.value = defaultFsRoot;
-      loadContainerFiles(defaultFsRoot);
+      openFsModal("audio");
     });
   }
 
   if (mediaServerBtn) {
     mediaServerBtn.addEventListener("click", () => {
-      state.fsMode = "media";
-      if (fsPathInput) fsPathInput.value = defaultFsRoot;
-      loadContainerFiles(defaultFsRoot);
+      openFsModal("media");
     });
   }
+
+  if (fsModalCloseBtn) {
+    fsModalCloseBtn.addEventListener("click", closeFsModal);
+  }
+  if (fsModalBackdrop) {
+    fsModalBackdrop.addEventListener("click", closeFsModal);
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && fsModal && !fsModal.classList.contains("hidden")) {
+      closeFsModal();
+    }
+  });
 
   async function fileToDataUrl(file) {
     return new Promise((resolve, reject) => {
