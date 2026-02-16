@@ -7,7 +7,7 @@ from sglang_omni.models.qwen3_asr.components.thinker import Qwen3ASRSplitThinker
 
 
 def run_demo():
-    model_id = "/opt/gpfs/home/tianteng/Qwen3-ASR/Qwen3-ASR-0.6B"
+    model_id = "Qwen/Qwen3-ASR-0.6B"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 

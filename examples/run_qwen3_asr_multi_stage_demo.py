@@ -154,7 +154,7 @@ def run_decode_stage(model_id: str):
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-id", type=str, default="Qwen3-ASR/Qwen3-ASR-0.6B")
+    parser.add_argument("--model-id", type=str, default="Qwen3/Qwen3-ASR-0.6B")
     parser.add_argument(
         "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
     )
