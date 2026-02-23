@@ -259,9 +259,10 @@ def decode_events(
 
     stream_state = state.stream_state
     if not stream_state:
-        stream_state.update({"token_ids": [], "text": ""})
+        stream_state.update({"token_ids": [], "text": "", "emitted_text": ""})
     token_ids = stream_state.setdefault("token_ids", [])
     prev_text = str(stream_state.setdefault("text", ""))
+    stream_state.setdefault("emitted_text", "")
 
     is_final = bool(thinker_out.get("is_final"))
 
@@ -297,11 +298,19 @@ def decode_events(
 
     token_ids.append(token_id)
     decoded = tokenizer.decode(token_ids, skip_special_tokens=True)
-    if decoded.startswith(prev_text):
-        delta = decoded[len(prev_text) :]
-    else:
-        delta = decoded
     stream_state["text"] = decoded
+
+    # Buffer incomplete multi-byte sequences (replacement char U+FFFD)
+    # to avoid emitting garbage or triggering a full text re-send when
+    # the completed character no longer prefix-matches the previous text.
+    if "\ufffd" in decoded:
+        return []
+
+    emitted_text = str(stream_state.get("emitted_text", ""))
+    delta = decoded[len(emitted_text) :]
+    if not delta:
+        return []
+    stream_state["emitted_text"] = decoded
     return [
         OmniEvent(
             type="text_delta", modality="text", payload={"text": delta}, is_final=False
