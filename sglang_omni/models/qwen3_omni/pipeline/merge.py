@@ -300,6 +300,7 @@ def decode_events(
     decoded = tokenizer.decode(token_ids, skip_special_tokens=True)
     stream_state["text"] = decoded
 
+    # Skip incomplete multi-byte characters (replacement char).
     if "\ufffd" in decoded:
         return []
 
