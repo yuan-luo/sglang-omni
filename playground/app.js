@@ -19,7 +19,7 @@
   const topPValueEl = $("top-p-value");
   const topKEl = $("top-k");
   const topKValueEl = $("top-k-value");
-  const returnAudioEl = $("return-audio");
+  const outputModalityEl = $("output-modality");
 
   const videoInput = $("video-input");
   const audioInput = $("audio-input");
@@ -99,6 +99,7 @@
     fsRootPath: "/",
     fsCurrentPath: "/",
     fsParentPath: null,
+    conversationHistory: [],
   };
 
   async function resolveDefaultFsRoot() {
@@ -510,6 +511,7 @@
   function clearChat() {
     messagesEl.innerHTML = "";
     chatPlaceholder.classList.remove("hidden");
+    state.conversationHistory = [];
   }
 
   function createPreviewItem(fileOrBlob, kind, nameOverride) {
@@ -1266,10 +1268,13 @@
 
     try {
       const mediaPayload = await buildMediaPayload();
+
+      // Build messages: always use current system prompt + full history
       const messages = [];
       if (systemText) {
         messages.push({ role: "system", content: systemText });
       }
+      messages.push(...state.conversationHistory);
       messages.push({ role: "user", content: userText || " " });
 
       const payload = {
@@ -1284,10 +1289,17 @@
         audios: mediaPayload.audios.length ? mediaPayload.audios : undefined,
       };
 
-      if (returnAudioEl && returnAudioEl.checked) {
+      const outputMode = outputModalityEl ? outputModalityEl.value : "text";
+      if (outputMode === "text") {
+        payload.modalities = ["text"];
+      } else if (outputMode === "audio") {
+        payload.modalities = ["audio"];
+        payload.audio = { format: "wav" };
+      } else if (outputMode === "both") {
         payload.modalities = ["text", "audio"];
         payload.audio = { format: "wav" };
       }
+      // "auto" — omit modalities, let backend decide
 
       const stream = streamChatCompletion(payload);
       for await (const chunk of stream) {
@@ -1299,17 +1311,23 @@
           addAssistantAudio(assistantMsg, audioUrl);
         }
       }
+
+      // Only append to history if we got a real response
+      if (assistantText) {
+        const userEntry = { role: "user", content: userText || " " };
+        if (mediaPayload.images.length) userEntry.images = mediaPayload.images;
+        if (mediaPayload.videos.length) userEntry.videos = mediaPayload.videos;
+        if (mediaPayload.audios.length) userEntry.audios = mediaPayload.audios;
+        state.conversationHistory.push(userEntry);
+        state.conversationHistory.push({ role: "assistant", content: assistantText });
+      }
     } catch (err) {
       if (err && err.name === "AbortError") {
         if (!assistantText) updateAssistantMessage(assistantMsg, "[stopped]");
       } else {
         console.error(err);
-        // Fallback: mock streaming tokens so UI keeps consistent behavior without backend
-        const mock = "This is a mock streaming response because the API request failed.";
-        await mockStreamTokens(mock, (chunk) => {
-          assistantText += chunk;
-          updateAssistantMessage(assistantMsg, assistantText);
-        });
+        const errMsg = err && err.message ? err.message : "Unknown error";
+        updateAssistantMessage(assistantMsg, "[Error] " + errMsg);
       }
     } finally {
       assistantMsg.classList.remove("streaming");
@@ -1361,4 +1379,17 @@
       }
     });
   }
+
+  // Auto-populate model from backend on load
+  (async function fetchModels() {
+    try {
+      const res = await fetch(getChatApiBase() + "/v1/models");
+      if (!res.ok) return;
+      const data = await res.json();
+      const models = data && data.data;
+      if (models && models.length > 0 && modelSelect) {
+        modelSelect.value = models[0].id;
+      }
+    } catch (_) { /* backend not running yet */ }
+  })();
 })();
