@@ -276,14 +276,8 @@ async def _chat_stream(
             role_sent = True
             emit = True
 
-        # Text chunk – skip content on the final chunk (finish_reason set)
-        # to avoid duplicating the full text that was already streamed.
-        if (
-            chunk.modality == "text"
-            and chunk.text
-            and "text" in requested_modalities
-            and chunk.finish_reason is None
-        ):
+        # Text chunk
+        if chunk.modality == "text" and chunk.text and "text" in requested_modalities:
             delta.content = chunk.text
             emit = True
 
@@ -315,11 +309,29 @@ async def _chat_stream(
             ],
         )
 
-        # Always keep finish_reason per OpenAI spec.
         data = stream_resp.model_dump(exclude_none=True)
         for choice in data.get("choices", []):
             choice.setdefault("finish_reason", None)
         yield f"data: {json.dumps(data)}\n\n"
+
+    # Finish chunk: empty delta + finish_reason.
+    finish_resp = ChatCompletionStreamResponse(
+        id=response_id,
+        created=created,
+        model=model,
+        choices=[
+            ChatCompletionStreamChoice(
+                index=0,
+                delta=ChatCompletionStreamDelta(),
+                finish_reason=finish_reason or "stop",
+            )
+        ],
+        usage=final_usage,
+    )
+    data = finish_resp.model_dump(exclude_none=True)
+    for choice in data.get("choices", []):
+        choice.setdefault("finish_reason", None)
+    yield f"data: {json.dumps(data)}\n\n"
 
     yield "data: [DONE]\n\n"
 
