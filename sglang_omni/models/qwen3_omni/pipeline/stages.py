@@ -153,12 +153,23 @@ def create_thinker_executor(
             events = [
                 OmniEvent(type="text_final", modality="text", payload={}, is_final=True)
             ]
-        return {
+        text_delta = ""
+        for event in events:
+            if event.is_final:
+                continue
+            t = event.payload.get("text")
+            if event.modality == "text" and t:
+                text_delta += t
+
+        result: dict[str, Any] = {
             "events": [_event_to_dict(event) for event in events],
             "token_id": token_id,
             "step": step,
             "stage": THINKER_STAGE,
         }
+        if text_delta:
+            result["text"] = text_delta
+        return result
 
     engine = create_ar_engine(
         model=model,
