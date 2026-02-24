@@ -1,4 +1,5 @@
-# SGLang-Omni
+SGLang-Omni
+=======================
 
 SGLang-Omni is an ecosystem project for SGLang.
 Omni models refer to models that have multi-modal inputs and multi-modal outputs.
@@ -10,11 +11,24 @@ Our core features include:
 - Multi-Stage Pipeline Framework for Omni Models
 - OpenAI-Compatible Server with Real-Time API support
 
-## Quick Start
 
-We will host the documentation upon open-sourcing. For now, you can find the documentation in the [docs](./docs) folder.
+.. toctree::
+   :maxdepth: 1
+   :caption: Get Started
 
-- [Get Started](./docs/get_started/installation.md)
-- [Developer Reference](./docs/developer_reference/architecture.md)
-- [Benchmarks](./docs/benchmarks/relay.md)
-- [Examples](./examples/README.md)
+   get_started/installation.md
+
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Benchmarks
+
+   benchmarks/relay.md
+
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Developer Reference
+
+   developer_reference/architecture.md
+   developer_reference/relay_design.md

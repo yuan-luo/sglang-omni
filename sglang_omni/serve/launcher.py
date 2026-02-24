@@ -35,6 +35,7 @@ import uvicorn
 from sglang_omni.client import Client
 from sglang_omni.config import PipelineConfig, PipelineRunner, compile_pipeline
 from sglang_omni.serve.openai_api import create_app
+from sglang_omni.utils import import_string
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +60,6 @@ def _resolve_builtin(
         raise ValueError(
             f"Unknown built-in pipeline: {pipeline_name!r}. " f"Available: {available}"
         )
-
-    from sglang_omni.config.imports import import_string
 
     factory_path = _BUILTIN_PIPELINES[pipeline_name]
     factory = import_string(factory_path)
@@ -106,16 +105,16 @@ async def _run_server(
         len(stages),
     )
 
-    # 3. Build Client -> FastAPI app
-    cl_kwargs = client_kwargs or {}
-    client = Client(coordinator, **cl_kwargs)
-    app = create_app(client, model_name=model_name or pipeline_config.name)
-
-    # 4. Run uvicorn
-    config = uvicorn.Config(app, host=host, port=port, log_level=log_level)
-    server = uvicorn.Server(config)
-
     try:
+        # 3. Build Client -> FastAPI app
+        cl_kwargs = client_kwargs or {}
+        client = Client(coordinator, **cl_kwargs)
+        app = create_app(client, model_name=model_name or pipeline_config.name)
+
+        # 4. Run uvicorn
+        config = uvicorn.Config(app, host=host, port=port, log_level=log_level)
+        server = uvicorn.Server(config)
+
         await server.serve()
     finally:
         logger.info("Shutting down pipeline …")
