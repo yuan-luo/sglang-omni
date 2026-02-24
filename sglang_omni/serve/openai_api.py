@@ -17,6 +17,7 @@ import uuid
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from sglang_omni.client import (
@@ -63,6 +64,14 @@ def create_app(
         Configured FastAPI application.
     """
     app = FastAPI(title="sglang-omni", version="0.1.0")
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     # Store references in app state for access from route handlers
     app.state.client = client

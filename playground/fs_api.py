@@ -104,7 +104,9 @@ def create_fs_app() -> FastAPI:
         )
 
     @app.get("/v1/fs/list")
-    async def list_container_files(path: str | None = Query(default=None)) -> JSONResponse:
+    async def list_container_files(
+        path: str | None = Query(default=None),
+    ) -> JSONResponse:
         root = _filesystem_root()
         current = _resolve_fs_path(root, path)
         if not root.exists() or not root.is_dir():
@@ -118,7 +120,9 @@ def create_fs_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=f"Not a directory: {current}")
 
         entries: list[dict[str, Any]] = []
-        for child in sorted(current.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+        for child in sorted(
+            current.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())
+        ):
             try:
                 resolved = child.resolve()
             except OSError:
@@ -171,7 +175,9 @@ def create_fs_app() -> FastAPI:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run standalone filesystem API server.")
+    parser = argparse.ArgumentParser(
+        description="Run standalone filesystem API server."
+    )
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--log-level", type=str, default="info")
@@ -190,9 +196,10 @@ def main() -> None:
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    uvicorn.run(create_fs_app(), host=args.host, port=args.port, log_level=args.log_level)
+    uvicorn.run(
+        create_fs_app(), host=args.host, port=args.port, log_level=args.log_level
+    )
 
 
 if __name__ == "__main__":
     main()
-
