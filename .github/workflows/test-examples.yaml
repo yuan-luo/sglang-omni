@@ -50,6 +50,8 @@ jobs:
           source omni/bin/activate
           export PYTHONPATH=$PWD
           bash .github/scripts/run_examples.sh
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
 
       - name: Save cache
         run: |
