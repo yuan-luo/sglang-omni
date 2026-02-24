@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: pr-test-${{ github.ref }}
+  group: pr-test-examples-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
