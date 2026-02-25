@@ -80,6 +80,13 @@ class PipelineConfig(BaseModel):
         self._validate_general()
         self._validate_fusion()
 
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> PipelineConfig:
+        """
+        Create a PipelineConfig from a dictionary.
+        """
+        return PipelineConfig(**data)
+
     def _validate_general(self) -> None:
         if not self.model_path:
             raise ValueError("Model path is required")

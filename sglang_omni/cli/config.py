@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+import logging
+from typing import Annotated
+
+import typer
+import yaml
+
+logger = logging.getLogger(__name__)
+
+config_app = typer.Typer(
+    help="View and export the pipeline configuration for local editing"
+)
+
+
+@config_app.command()
+def view(
+    model_path: Annotated[
+        str,
+        typer.Option(
+            help="The Hugging Face model ID or the path to the model directory."
+        ),
+    ],
+) -> None:
+    """View the model's pipeline configuration."""
+    from sglang_omni.models.qwen3_omni.pipeline.config import (
+        create_text_first_pipeline_config,
+    )
+
+    config = create_text_first_pipeline_config(model_id=model_path)
+    config_json = config.model_dump(mode="json")
+    print(
+        yaml.dump(
+            config_json,
+            sort_keys=False,  # preserve order
+            default_flow_style=False,  # use block style (not inline)
+            indent=2,  # control indentation
+        )
+    )
+
+
+@config_app.command()
+def export(
+    model_path: Annotated[
+        str,
+        typer.Option(
+            help="The Hugging Face model ID or the path to the model directory."
+        ),
+    ],
+    output_path: Annotated[
+        str, typer.Option(help="Path to the output JSON file.")
+    ] = None,
+) -> None:
+    """Export the default pipeline configuration to a YAML file."""
+    # get the default pipeline config for the model
+    # TODO: get this model via class type check
+    from sglang_omni.models.qwen3_omni.pipeline.config import (
+        create_text_first_pipeline_config,
+    )
+
+    config = create_text_first_pipeline_config(model_id=model_path)
+
+    # export config in a yaml file
+    if output_path is None:
+        output_path = f"./config_{config.name}.yaml"
+
+    with open(output_path, "w") as f:
+        yaml.dump(
+            config.model_dump(mode="json"),
+            f,
+            sort_keys=False,
+            default_flow_style=False,
+            indent=2,
+        )
+    print(f"Pipeline config exported to {output_path}")

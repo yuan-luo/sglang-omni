@@ -1,0 +1,88 @@
+from typing import Any
+
+from sglang_omni.config.schema import PipelineConfig
+
+
+class ConfigManager:
+    """
+    The ConfigManager is responsible for managing the configuration based on the user CLI arguments, configuration file
+    given by the user, and the default configuration for the model. As the omni models have various architectures, setting a uniform
+    list of arguments is not feasible. Thus, we take reference from the TorchTitan's configuration management system to allow users to
+    dynamically configure their runtime settings.
+    """
+
+    def parse_extra_args(self, args: list[str]) -> dict[str, Any]:
+        """
+        Parse the CLI arguments and return the configuration.
+        """
+        # we expect the arguments to be key-values pairs
+        extra_args = {}
+        cur_key, cur_value = None, None
+        for arg in args:
+            if "=" in arg and cur_key is None and cur_value is None:
+                cur_key, cur_value = arg.split("=")
+            elif cur_key is None and cur_value is None:
+                # we remove the -- in front of the key
+                cur_key = arg
+            elif cur_key is not None and cur_value is None:
+                # record the key value pair
+                cur_value = arg
+            else:
+                raise ValueError(f"Invalid argument: {arg}")
+
+            if cur_key is not None and cur_value is not None:
+                extra_args[cur_key.lstrip("-")] = cur_value
+                cur_key, cur_value = None, None
+        return extra_args
+
+    def _convert_types(self, extra_args: dict[str, str]) -> dict[str, Any]:
+        """
+        Convert the configuration to the inferred data types.
+        """
+        for key, value in extra_args.items():
+            if value.lower() == "true":
+                extra_args[key] = True
+            elif value.lower() == "false":
+                extra_args[key] = False
+            elif value.lower() == "none":
+                extra_args[key] = None
+            elif value.isdigit():
+                extra_args[key] = int(value)
+            else:
+                extra_args[key] = value
+        return extra_args
+
+    def merge_config(
+        self, model_path: str, extra_args: dict[str, Any]
+    ) -> PipelineConfig:
+        """
+        Merge the configuration and the extra arguments.
+        """
+        from sglang_omni.models.qwen3_omni.pipeline.config import (
+            create_text_first_pipeline_config,
+        )
+
+        config = create_text_first_pipeline_config(model_id=model_path)
+        extra_args = self._convert_types(extra_args)
+
+        # we then update the configuration
+        # note that the key of the extra argumeents is in the chained format, e.g. "stages.0.executor.args.dtype"
+        # we need to update the configuration in place
+        config_cls = type(config)
+        config_data = config.model_dump()
+
+        for key, value in extra_args.items():
+            current = config_data
+            keys = key.split(".")
+            for k in keys[:-1]:
+                # if k is an digit, treat it as an index
+                if k.isdigit():
+                    k = int(k)
+                current = current[k]
+
+            # update the value
+            current[keys[-1]] = value
+
+        # validate the configuration
+        merged_config = config_cls.from_dict(config_data)
+        return merged_config
