@@ -122,6 +122,7 @@ async def _run_server(
     model_name: str | None = None,
     log_level: str = "info",
     client_kwargs: dict[str, Any] | None = None,
+    serve_playground: str | None = None,
 ) -> None:
     """Compile the pipeline, start stages, and run the OpenAI server.
 
@@ -144,7 +145,11 @@ async def _run_server(
         # 3. Build Client -> FastAPI app
         cl_kwargs = client_kwargs or {}
         client = Client(coordinator, **cl_kwargs)
-        app = create_app(client, model_name=model_name or pipeline_config.name)
+        app = create_app(
+            client,
+            model_name=model_name or pipeline_config.name,
+            serve_playground=serve_playground,
+        )
 
         profiler_dir = os.environ.get("SGLANG_TORCH_PROFILER_DIR")
         profiler_ctl = ProfilerControlClient(stage_endpoints)
@@ -169,6 +174,7 @@ def launch_server(
     model_name: str | None = None,
     log_level: str = "info",
     client_kwargs: dict[str, Any] | None = None,
+    serve_playground: str | None = None,
 ) -> None:
     """Blocking helper: compile pipeline and start the OpenAI-compatible server.
 
@@ -181,6 +187,9 @@ def launch_server(
         log_level: Uvicorn log level.
         client_kwargs: Extra keyword arguments forwarded to
             :class:`~sglang_omni.client.Client`.
+        serve_playground: Path to the ``playground/`` directory.  When set,
+            the server also serves the frontend UI and filesystem browser
+            on the same port.
     """
     asyncio.run(
         _run_server(
@@ -190,6 +199,7 @@ def launch_server(
             model_name=model_name,
             log_level=log_level,
             client_kwargs=client_kwargs,
+            serve_playground=serve_playground,
         )
     )
 
