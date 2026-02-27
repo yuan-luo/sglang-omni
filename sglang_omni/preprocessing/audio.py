@@ -25,9 +25,7 @@ def _decode_audio_bytes_av(data: bytes) -> tuple[np.ndarray, int]:
 
     container = av.open(io.BytesIO(data))
     try:
-        audio_stream = next(
-            (s for s in container.streams if s.type == "audio"), None
-        )
+        audio_stream = next((s for s in container.streams if s.type == "audio"), None)
         if audio_stream is None:
             raise ValueError("No audio stream found in data")
 
