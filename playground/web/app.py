@@ -1,11 +1,14 @@
+import argparse
 import logging
 import mimetypes
+import os
 from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, FileResponse, HTTPException, JSONResponse, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger(__name__)
@@ -52,6 +55,18 @@ def _fs_classify(path: Path) -> str:
         if suffix in suffixes:
             return kind
     return "other"
+
+
+def _register_home(app: FastAPI) -> None:
+    API_BASE = os.environ.get("SGLANG_OMNI_API_BASE", "")  # empty = use same origin
+
+    @app.get("/")
+    async def index():
+        html = (FRONTEND_DIR / "index.html").read_text()
+        if API_BASE:
+            injection = f'<script>window.SGLANG_OMNI_API_BASE = "{API_BASE}";</script>'
+            html = html.replace("<head>", f"<head>{injection}", 1)
+        return HTMLResponse(html)
 
 
 def _register_filesystem(app: FastAPI) -> None:
@@ -128,6 +143,12 @@ def _register_filesystem(app: FastAPI) -> None:
         )
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="SGLang-Omni Playground")
+    parser.add_argument("--port", type=int, default=7860)
+    return parser.parse_args()
+
+
 app = FastAPI(title="sglang-omni-playground")
 
 app.add_middleware(
@@ -137,9 +158,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+_register_filesystem(app)
+_register_home(app)
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 assert FRONTEND_DIR.is_dir(), "Frontend directory does not exist"
 app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True))
 logger.info("Serving playground UI from %s", FRONTEND_DIR)
-uvicorn.run(app, host="0.0.0.0", port=8000)
+
+args = parse_args()
+uvicorn.run(app, host="0.0.0.0", port=args.port)
