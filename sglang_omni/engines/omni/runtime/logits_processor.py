@@ -12,7 +12,6 @@ from typing import Any, Protocol, runtime_checkable
 
 import torch
 
-
 # ---------------------------------------------------------------------------
 # Sampling context
 # ---------------------------------------------------------------------------
@@ -77,9 +76,7 @@ class LogitsProcessorPipeline:
     def __len__(self) -> int:
         return len(self._processors)
 
-    def __call__(
-        self, logits: torch.Tensor, context: SamplingContext
-    ) -> torch.Tensor:
+    def __call__(self, logits: torch.Tensor, context: SamplingContext) -> torch.Tensor:
         for proc in self._processors:
             logits = proc(logits, context)
         return logits
@@ -93,9 +90,7 @@ class LogitsProcessorPipeline:
 class TemperatureProcessor:
     """Scale logits by ``1 / temperature``."""
 
-    def __call__(
-        self, logits: torch.Tensor, context: SamplingContext
-    ) -> torch.Tensor:
+    def __call__(self, logits: torch.Tensor, context: SamplingContext) -> torch.Tensor:
         t = context.temperature
         if t <= 0.0:
             return logits
@@ -106,22 +101,16 @@ class TopPProcessor:
     """Nucleus (top-p) sampling: zero out tokens outside the smallest set
     whose cumulative probability exceeds ``top_p``."""
 
-    def __call__(
-        self, logits: torch.Tensor, context: SamplingContext
-    ) -> torch.Tensor:
+    def __call__(self, logits: torch.Tensor, context: SamplingContext) -> torch.Tensor:
         top_p = context.top_p
         if top_p >= 1.0:
             return logits
 
         sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-        cumulative_probs = torch.cumsum(
-            torch.softmax(sorted_logits, dim=-1), dim=-1
-        )
+        cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
         mask = cumulative_probs > top_p
         mask[..., 0] = False  # always keep at least one token
-        indices_to_remove = mask.scatter(
-            dim=-1, index=sorted_indices, src=mask
-        )
+        indices_to_remove = mask.scatter(dim=-1, index=sorted_indices, src=mask)
         logits = logits.masked_fill(indices_to_remove, float("-inf"))
         return logits
 
@@ -129,9 +118,7 @@ class TopPProcessor:
 class TopKProcessor:
     """Top-k truncation: keep only the ``top_k`` highest-scoring tokens."""
 
-    def __call__(
-        self, logits: torch.Tensor, context: SamplingContext
-    ) -> torch.Tensor:
+    def __call__(self, logits: torch.Tensor, context: SamplingContext) -> torch.Tensor:
         top_k = context.top_k
         if top_k <= 0 or top_k >= logits.shape[-1]:
             return logits
@@ -149,9 +136,7 @@ class RepetitionPenaltyProcessor:
     scores < 0 are multiplied.
     """
 
-    def __call__(
-        self, logits: torch.Tensor, context: SamplingContext
-    ) -> torch.Tensor:
+    def __call__(self, logits: torch.Tensor, context: SamplingContext) -> torch.Tensor:
         penalty = context.repetition_penalty
         if penalty == 1.0 or context.previous_tokens is None:
             return logits
@@ -162,9 +147,7 @@ class RepetitionPenaltyProcessor:
 
         logits = logits.clone()
         scores = torch.gather(logits, dim=-1, index=prev)
-        scores = torch.where(
-            scores < 0, scores * penalty, scores / penalty
-        )
+        scores = torch.where(scores < 0, scores * penalty, scores / penalty)
         logits.scatter_(dim=-1, index=prev, src=scores)
         return logits
 
@@ -172,9 +155,7 @@ class RepetitionPenaltyProcessor:
 class FrequencyPenaltyProcessor:
     """Subtract ``frequency_penalty * count(token)`` from logits."""
 
-    def __call__(
-        self, logits: torch.Tensor, context: SamplingContext
-    ) -> torch.Tensor:
+    def __call__(self, logits: torch.Tensor, context: SamplingContext) -> torch.Tensor:
         penalty = context.frequency_penalty
         if penalty == 0.0 or context.previous_tokens is None:
             return logits
@@ -183,7 +164,9 @@ class FrequencyPenaltyProcessor:
         counts = torch.zeros_like(logits)
         if prev.dim() == 1:
             prev = prev.unsqueeze(0).expand(logits.shape[0], -1)
-        counts.scatter_add_(dim=-1, index=prev, src=torch.ones_like(prev, dtype=logits.dtype))
+        counts.scatter_add_(
+            dim=-1, index=prev, src=torch.ones_like(prev, dtype=logits.dtype)
+        )
         logits = logits - penalty * counts
         return logits
 
@@ -194,9 +177,11 @@ class FrequencyPenaltyProcessor:
 
 
 def default_logits_pipeline() -> LogitsProcessorPipeline:
-    """Standard pipeline: repetition penalty → temperature → top-p."""
-    return LogitsProcessorPipeline([
-        RepetitionPenaltyProcessor(),
-        TemperatureProcessor(),
-        TopPProcessor(),
-    ])
+    """Standard pipeline: repetition penalty → top-p → temperature."""
+    return LogitsProcessorPipeline(
+        [
+            RepetitionPenaltyProcessor(),
+            TopPProcessor(),
+            TemperatureProcessor(),
+        ]
+    )
