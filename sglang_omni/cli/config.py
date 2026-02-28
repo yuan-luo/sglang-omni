@@ -5,6 +5,9 @@ from typing import Annotated
 
 import typer
 import yaml
+from transformers import AutoConfig
+
+from sglang_omni.models import PIPELINE_CONFIG_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +26,9 @@ def view(
     ],
 ) -> None:
     """View the model's pipeline configuration."""
-    from sglang_omni.models.qwen3_omni.pipeline.config import (
-        create_text_first_pipeline_config,
-    )
-
-    config = create_text_first_pipeline_config(model_id=model_path)
+    hf_config = AutoConfig.from_pretrained(model_path)
+    config_cls = PIPELINE_CONFIG_REGISTRY.get_config(hf_config.architectures[0])
+    config = config_cls(model_path=model_path)
     config_json = config.model_dump(mode="json")
     print(
         yaml.dump(
