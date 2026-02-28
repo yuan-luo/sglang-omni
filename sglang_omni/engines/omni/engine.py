@@ -89,6 +89,10 @@ class OmniEngine(Engine):
             except asyncio.CancelledError:
                 pass
             self._loop_task = None
+
+        if hasattr(self.model_runner, "cleanup"):
+            self.model_runner.cleanup()
+
         logger.info("OmniEngine stopped")
 
     # -------------------------------------------------------------------------

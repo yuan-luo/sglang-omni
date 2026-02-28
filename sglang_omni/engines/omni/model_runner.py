@@ -46,6 +46,23 @@ class ModelRunner:
         self.model = model.to(device)
         self.model.eval()
 
+    def cleanup(self) -> None:
+        """Release model and CUDA resources for clean shutdown."""
+        if hasattr(self.output_processor, "cleanup"):
+            self.output_processor.cleanup()
+
+        del self.model
+        self.model = None  # type: ignore[assignment]
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+        try:
+            torch._dynamo.reset()  # flush inductor CUDA graph cache
+        except Exception:
+            pass
+
     def execute(self, scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
         """Execute model inference for given scheduler output."""
         if scheduler_output.num_requests == 0:

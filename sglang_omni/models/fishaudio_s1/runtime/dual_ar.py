@@ -464,6 +464,11 @@ class DualAROutputProcessor:
                 fullgraph=True,
             )
 
+    def cleanup(self) -> None:
+        """Release compiled CUDA graph state to avoid segfault at exit."""
+        self._compiled_decode = None
+        self._model = None
+
     def process(
         self,
         model_output: Any,
