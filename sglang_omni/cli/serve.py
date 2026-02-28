@@ -11,8 +11,6 @@ from sglang_omni.serve.launcher import launch_server, load_pipeline_config
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BUILTIN_PIPELINE = "qwen3-omni"
-
 
 def serve(
     ctx: typer.Context,

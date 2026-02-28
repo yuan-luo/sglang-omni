@@ -35,11 +35,9 @@ from typing import Any
 import uvicorn
 from fastapi import APIRouter
 from pydantic import BaseModel
-from transformers import AutoConfig
 
 from sglang_omni.client import Client
 from sglang_omni.config import PipelineConfig, PipelineRunner, compile_pipeline
-from sglang_omni.models.registry import PipelineConfigRegistry
 from sglang_omni.profiler.profiler_control import ProfilerControlClient
 from sglang_omni.serve.openai_api import create_app
 

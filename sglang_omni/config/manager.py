@@ -1,6 +1,9 @@
 from typing import Any
 
+from transformers import AutoConfig
+
 from sglang_omni.config.schema import PipelineConfig
+from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 
 
 class ConfigManager:
@@ -58,17 +61,15 @@ class ConfigManager:
         """
         Merge the configuration and the extra arguments.
         """
-        from sglang_omni.models.qwen3_omni.pipeline.config import (
-            create_text_first_pipeline_config,
-        )
-
-        config = create_text_first_pipeline_config(model_id=model_path)
+        hf_config = AutoConfig.from_pretrained(model_path)
+        print(PIPELINE_CONFIG_REGISTRY.get_supported_archs())
+        config_cls = PIPELINE_CONFIG_REGISTRY.get_config(hf_config.architectures[0])
+        config = config_cls(model_path=model_path)
         extra_args = self._convert_types(extra_args)
 
         # we then update the configuration
         # note that the key of the extra argumeents is in the chained format, e.g. "stages.0.executor.args.dtype"
         # we need to update the configuration in place
-        config_cls = type(config)
         config_data = config.model_dump()
 
         for key, value in extra_args.items():

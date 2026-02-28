@@ -36,6 +36,10 @@ def import_pipeline_configs(
                 ), f"Config module {module.__name__} must have an EntryClass in its submodule {config_path}"
                 config_cls = getattr(config_module, "EntryClass")
                 model_arch_to_config_cls[config_cls.architecture] = config_cls
+            else:
+                raise ValueError(
+                    f"Config module {module.__name__} does not have a submodule {config_path}"
+                )
     return model_arch_to_config_cls
 
 
@@ -52,6 +56,7 @@ class _PipelineConfigRegistry:
     ) -> None:
         # we register the model
         pipeline_configs = import_pipeline_configs(package_name, config_path, strict)
+        print(pipeline_configs)
 
         if overwrite:
             self.configs.update(pipeline_configs)
@@ -75,5 +80,5 @@ class _PipelineConfigRegistry:
         return self.configs[arch]
 
 
-PipelineConfigRegistry = _PipelineConfigRegistry()
-PipelineConfigRegistry.register_config("sglang_omni.models", "config")
+PIPELINE_CONFIG_REGISTRY = _PipelineConfigRegistry()
+PIPELINE_CONFIG_REGISTRY.register_config("sglang_omni.models", "config")
