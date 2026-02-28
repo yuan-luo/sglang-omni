@@ -12,9 +12,9 @@ This directory contains two playground interfaces for SGLang-Omni.
 The web playground is embedded in the backend — a single process serves both the API and the UI.
 
 ```bash
+uv pip install -v -e ".[dev]"
 ./playground/web/start.sh \
-  --pipeline qwen3-omni \
-  --model-id Qwen/Qwen3-Omni-30B-A3B-Instruct
+  --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct
 ```
 
 Then open `http://localhost:8000` in your browser.
@@ -23,8 +23,7 @@ Then open `http://localhost:8000` in your browser.
 
 ```bash
 ./playground/web/start.sh \
-  --pipeline qwen3-omni \
-  --model-id Qwen/Qwen3-Omni-30B-A3B-Instruct \
+  --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct \
   --port 8080
 ```
 

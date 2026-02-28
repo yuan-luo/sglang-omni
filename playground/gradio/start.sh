@@ -9,9 +9,9 @@ set -euo pipefail
 #   pip install "sglang-omni[gradio]"   # or: pip install gradio httpx
 #
 # Usage:
-#   ./playground/gradio/start.sh --pipeline qwen3-omni --model-id Qwen/Qwen3-Omni-30B-A3B-Instruct
-#   CUDA_VISIBLE_DEVICES=0 ./playground/gradio/start.sh --pipeline qwen3-omni --model-id <id>
-#   ./playground/gradio/start.sh --pipeline qwen3-omni --model-id <id> --port 8080 --gradio-port 7861
+#   ./playground/gradio/start.sh --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct
+#   CUDA_VISIBLE_DEVICES=0 ./playground/gradio/start.sh --model-path <path>
+#   ./playground/gradio/start.sh --model-path <path> --port 8080 --gradio-port 7861
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,15 +28,16 @@ while [[ $# -gt 0 ]]; do
     --port)          BACKEND_PORT="$2"; shift 2 ;;
     --gradio-port)   GRADIO_PORT="$2"; shift 2 ;;
     --share)         GRADIO_SHARE="--share"; shift ;;
+    --pipeline)      shift 2 ;;
     *)               BACKEND_ARGS+=("$1"); shift ;;
   esac
 done
 
 if [[ ${#BACKEND_ARGS[@]} -eq 0 ]]; then
-  echo "Usage: $0 --pipeline <name> --model-id <model> [--port PORT] [--gradio-port PORT] [--share]"
+  echo "Usage: $0 --model-path <model> [--port PORT] [--gradio-port PORT] [--share]"
   echo ""
   echo "Example:"
-  echo "  CUDA_VISIBLE_DEVICES=0 $0 --pipeline qwen3-omni --model-id Qwen/Qwen3-Omni-30B-A3B-Instruct"
+  echo "  CUDA_VISIBLE_DEVICES=0 $0 --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct"
   exit 1
 fi
 

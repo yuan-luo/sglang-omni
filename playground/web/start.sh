@@ -5,9 +5,9 @@ set -euo pipefail
 # Start the playground: single-process backend serving API + UI + file browser.
 #
 # Usage:
-#   ./playground/web/start.sh --pipeline qwen3-omni --model-id Qwen/Qwen3-Omni-30B-A3B-Instruct
-#   CUDA_VISIBLE_DEVICES=5 ./playground/web/start.sh --pipeline qwen3-omni --model-id <id>
-#   ./playground/web/start.sh --pipeline qwen3-omni --model-id <id> --port 8080
+#   ./playground/web/start.sh --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct
+#   CUDA_VISIBLE_DEVICES=5 ./playground/web/start.sh --model-path <path>
+#   ./playground/web/start.sh --model-path <path> --port 8080
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,6 +22,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --port)  PORT="$2"; shift 2 ;;
     --playground-port)   PLAYGROUND_PORT="$2"; shift 2 ;;
+    --pipeline)  shift 2 ;;
     *)       BACKEND_ARGS+=("$1"); shift ;;
   esac
 done

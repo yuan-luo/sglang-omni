@@ -32,7 +32,7 @@ class RelayConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["shm", "nccl", "nixl"] = "nixl"
+    type: Literal["shm", "nccl", "nixl"] = "shm"
     slot_size_mb: int = 64
     credits: int = 2
     rank: int | None = None
