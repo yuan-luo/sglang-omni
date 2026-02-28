@@ -7,7 +7,7 @@ import typer
 import yaml
 from transformers import AutoConfig
 
-from sglang_omni.models import PIPELINE_CONFIG_REGISTRY
+from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 
 logger = logging.getLogger(__name__)
 
