@@ -105,9 +105,7 @@ _dp._ATTN_DP_RANK, _dp._ATTN_DP_SIZE = 0, 1
 _dp._LOCAL_ATTN_DP_RANK, _dp._LOCAL_ATTN_DP_SIZE = 0, 1
 
 # ---- 5. Import Talker ----
-pkg = types.ModuleType("sglang_omni.models.qwen3_omni")
-pkg.__path__ = [str(Path(__file__).resolve().parents[1] / "sglang_omni/models/qwen3_omni")]
-sys.modules["sglang_omni.models.qwen3_omni"] = pkg
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sglang_omni.config.qwen3_omni import Qwen3OmniMoeTalkerConfig
 from sglang_omni.models.qwen3_omni.talker import Qwen3OmniTalker
