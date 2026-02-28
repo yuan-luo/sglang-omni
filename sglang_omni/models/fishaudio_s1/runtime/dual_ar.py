@@ -24,11 +24,6 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch import Tensor
 
-from sglang_omni.engines.omni.types import (
-    RequestOutput,
-    SchedulerOutput,
-    SchedulerRequest,
-)
 from sglang_omni.engines.omni.runtime.common import SimpleResourceManager
 from sglang_omni.engines.omni.runtime.interfaces import ResourceManager
 from sglang_omni.engines.omni.runtime.logits_processor import (
@@ -36,6 +31,11 @@ from sglang_omni.engines.omni.runtime.logits_processor import (
     SamplingContext,
 )
 from sglang_omni.engines.omni.runtime.sampler import MultinomialNoSyncSampler, Sampler
+from sglang_omni.engines.omni.types import (
+    RequestOutput,
+    SchedulerOutput,
+    SchedulerRequest,
+)
 
 if TYPE_CHECKING:
     from .radix_cache import DualARRadixCache
@@ -162,9 +162,7 @@ def _sample(
 
     # Top-p filtering
     sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-    cum_probs = torch.cumsum(
-        torch.nn.functional.softmax(sorted_logits, dim=-1), dim=-1
-    )
+    cum_probs = torch.cumsum(torch.nn.functional.softmax(sorted_logits, dim=-1), dim=-1)
     sorted_mask = cum_probs > top_p
     sorted_mask[..., 0] = False  # keep at least one
     indices_to_remove = sorted_mask.scatter(
@@ -283,9 +281,7 @@ class DualARBatchPlanner:
 
             if self._radix_cache is not None:
                 row0 = input_values[0].tolist()
-                matched_len, kv_data, last_node = (
-                    self._radix_cache.match_prefix(row0)
-                )
+                matched_len, kv_data, last_node = self._radix_cache.match_prefix(row0)
 
                 if matched_len > 0 and kv_data is not None:
                     data._original_row0 = input_values[0].clone()

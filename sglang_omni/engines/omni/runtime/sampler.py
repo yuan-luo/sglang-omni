@@ -15,7 +15,6 @@ import torch
 
 from .logits_processor import SamplingContext
 
-
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
@@ -53,9 +52,7 @@ class Sampler(Protocol):
 class ArgmaxSampler:
     """Greedy decoding: pick the token with the highest score."""
 
-    def sample(
-        self, logits: torch.Tensor, context: SamplingContext
-    ) -> SamplerOutput:
+    def sample(self, logits: torch.Tensor, context: SamplingContext) -> SamplerOutput:
         token_ids = logits.argmax(dim=-1)
         return SamplerOutput(token_ids=token_ids)
 
@@ -63,9 +60,7 @@ class ArgmaxSampler:
 class MultinomialSampler:
     """Stochastic sampling from the (already processed) logits distribution."""
 
-    def sample(
-        self, logits: torch.Tensor, context: SamplingContext
-    ) -> SamplerOutput:
+    def sample(self, logits: torch.Tensor, context: SamplingContext) -> SamplerOutput:
         probs = torch.softmax(logits, dim=-1)
         token_ids = torch.multinomial(probs, num_samples=1).squeeze(-1)
         return SamplerOutput(token_ids=token_ids)
@@ -77,9 +72,7 @@ class MultinomialNoSyncSampler:
     Used by FishAudio's inference code for lower latency on GPU.
     """
 
-    def sample(
-        self, logits: torch.Tensor, context: SamplingContext
-    ) -> SamplerOutput:
+    def sample(self, logits: torch.Tensor, context: SamplingContext) -> SamplerOutput:
         probs = torch.softmax(logits, dim=-1)
         q = torch.empty_like(probs).exponential_(1)
         token_ids = torch.argmax(probs / q, dim=-1)

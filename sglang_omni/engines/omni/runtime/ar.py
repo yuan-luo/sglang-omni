@@ -11,12 +11,6 @@ import torch
 from ..types import RequestOutput, SchedulerOutput, SchedulerRequest
 from .common import SimpleResourceManager
 from .interfaces import ResourceManager
-from .logits_processor import (
-    LogitsProcessorPipeline,
-    SamplingContext,
-    default_logits_pipeline,
-)
-from .sampler import ArgmaxSampler, MultinomialSampler, Sampler
 
 # -----------------------------------------------------------------------------
 # Data Structures

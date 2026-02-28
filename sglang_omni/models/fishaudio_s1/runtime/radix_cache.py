@@ -460,7 +460,9 @@ class DualARRadixCache:
                 logger.warning(
                     "Cannot evict: need %d tokens but all leaves are locked "
                     "(total=%d, max=%d)",
-                    needed_tokens, self._total_tokens, self._max_tokens,
+                    needed_tokens,
+                    self._total_tokens,
+                    self._max_tokens,
                 )
                 return False
             self._remove_leaf(leaf)

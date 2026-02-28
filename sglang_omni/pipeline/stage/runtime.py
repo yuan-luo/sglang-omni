@@ -269,7 +269,8 @@ class Stage:
                 await abort_task
 
             _done, pending = await asyncio.wait(
-                worker_tasks, timeout=5.0,
+                worker_tasks,
+                timeout=5.0,
             )
             for task in pending:
                 task.cancel()
