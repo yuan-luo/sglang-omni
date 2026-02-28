@@ -73,8 +73,6 @@ class StagePayload:
         request = data.get("request", {})
         if isinstance(request, dict) and request.get("_type") == "OmniRequest":
             request_obj = OmniRequest.from_dict(request)
-        else:
-            request_obj = OmniRequest.from_dict(request)
         return cls(
             request_id=data.get("request_id", ""),
             request=request_obj,

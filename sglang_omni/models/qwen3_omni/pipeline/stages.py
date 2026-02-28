@@ -9,7 +9,6 @@ import torch
 from transformers import AutoTokenizer
 
 from sglang_omni.engines.omni import create_ar_engine, create_encoder_engine
-from sglang_omni.executors import EngineExecutor, PreprocessingExecutor
 from sglang_omni.models.qwen3_omni.components.audio_encoder import Qwen3OmniAudioEncoder
 from sglang_omni.models.qwen3_omni.components.image_encoder import Qwen3OmniImageEncoder
 from sglang_omni.models.qwen3_omni.components.preprocessor import Qwen3OmniPreprocessor
@@ -28,6 +27,7 @@ from sglang_omni.models.qwen3_omni.pipeline.next_stage import (
     THINKER_STAGE,
 )
 from sglang_omni.models.qwen3_omni.pipeline.state_io import load_state, store_state
+from sglang_omni.pipeline.executor import EngineExecutor, PreprocessingExecutor
 from sglang_omni.proto import StagePayload
 
 

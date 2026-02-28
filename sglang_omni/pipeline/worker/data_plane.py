@@ -127,8 +127,6 @@ class DataPlaneAdapter:
             # Concatenate all tensors
             if tensor_buffers[0].is_cuda:
                 all_tensors = torch.cat(tensor_buffers)
-            else:
-                all_tensors = torch.cat(tensor_buffers)
         else:
             # Relay still expects a payload to transfer; use a 1-byte placeholder.
             all_tensors = torch.zeros(1, dtype=torch.uint8, device=device)
