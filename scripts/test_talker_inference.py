@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Test Talker inference (forward pass) with mocked SGLang runtime.
 
 Mocking strategy:
