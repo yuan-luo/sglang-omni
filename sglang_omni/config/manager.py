@@ -23,9 +23,8 @@ class ConfigManager:
         cur_key, cur_value = None, None
         for arg in args:
             if "=" in arg and cur_key is None and cur_value is None:
-                cur_key, cur_value = arg.split("=")
+                cur_key, cur_value = arg.split("=", 1)
             elif cur_key is None and cur_value is None:
-                # we remove the -- in front of the key
                 cur_key = arg
             elif cur_key is not None and cur_value is None:
                 # record the key value pair
@@ -34,6 +33,7 @@ class ConfigManager:
                 raise ValueError(f"Invalid argument: {arg}")
 
             if cur_key is not None and cur_value is not None:
+                # remove the -- in front of the key
                 extra_args[cur_key.lstrip("-")] = cur_value
                 cur_key, cur_value = None, None
         return extra_args
@@ -49,8 +49,8 @@ class ConfigManager:
                 extra_args[key] = False
             elif value.lower() == "none":
                 extra_args[key] = None
-            elif value.isdigit():
-                extra_args[key] = int(value)
+            elif value.isnumeric():
+                extra_args[key] = float(value) if "." in value else int(value)
             else:
                 extra_args[key] = value
         return extra_args
