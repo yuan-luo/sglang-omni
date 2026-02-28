@@ -54,12 +54,10 @@ def export(
 ) -> None:
     """Export the default pipeline configuration to a YAML file."""
     # get the default pipeline config for the model
-    # TODO: get this model via class type check
-    from sglang_omni.models.qwen3_omni.pipeline.config import (
-        create_text_first_pipeline_config,
-    )
 
-    config = create_text_first_pipeline_config(model_id=model_path)
+    hf_config = AutoConfig.from_pretrained(model_path)
+    config_cls = PIPELINE_CONFIG_REGISTRY.get_config(hf_config.architectures[0])
+    config = config_cls(model_path=model_path)
 
     # export config in a yaml file
     if output_path is None:
