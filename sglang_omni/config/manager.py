@@ -88,7 +88,7 @@ class ConfigManager:
         return merged_config
 
     @staticmethod
-    def from_model_path(model_path: str) -> PipelineConfig:
+    def from_model_path(model_path: str) -> "ConfigManager":
         """
         Load the configuration from the model path.
         """
@@ -98,7 +98,7 @@ class ConfigManager:
         return ConfigManager(config)
 
     @staticmethod
-    def from_file(file_path: str) -> PipelineConfig:
+    def from_file(file_path: str) -> "ConfigManager":
         """
         Load the configuration from the file path.
         """
