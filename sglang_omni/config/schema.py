@@ -80,6 +80,8 @@ class PipelineConfig(BaseModel):
     def model_post_init(self, __context: Any = None) -> None:
         self._validate_general()
         self._validate_fusion()
+
+        # we set this attribute to enable saving to and loading from the same pipeline class
         self.config_cls = self.__class__.__name__
 
     @staticmethod
