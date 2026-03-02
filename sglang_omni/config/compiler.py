@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,14 @@ def _compile_stage(
         input_handler=input_handler,
         relay_config=_build_relay_config(stage_cfg, global_cfg),
     )
+
+    # check if factory has the signature of model_path and the user does not provide the model path
+    # if yes, use the one in global config
+    if (
+        "model_path" in inspect.signature(factory).parameters
+        and "model_path" not in stage_cfg.executor.args
+    ):
+        stage_cfg.executor.args["model_path"] = global_cfg.model_path
 
     for _ in range(stage_cfg.num_workers):
         executor = factory(**stage_cfg.executor.args)
