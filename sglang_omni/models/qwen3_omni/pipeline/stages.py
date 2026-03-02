@@ -40,8 +40,8 @@ def _event_to_dict(event: OmniEvent) -> dict[str, Any]:
     }
 
 
-def create_preprocessing_executor(model_id: str) -> PreprocessingExecutor:
-    preprocessor = Qwen3OmniPreprocessor(model_id=model_id)
+def create_preprocessing_executor(model_path: str) -> PreprocessingExecutor:
+    preprocessor = Qwen3OmniPreprocessor(model_path=model_path)
 
     async def _preprocess(payload: StagePayload) -> StagePayload:
         return await preprocessor(payload)
@@ -78,34 +78,34 @@ def _create_encoder_executor(
 
 
 def create_image_encoder_executor(
-    model_id: str,
+    model_path: str,
     *,
     device: str = "cuda",
     dtype: str | None = None,
 ) -> EngineExecutor:
-    model = Qwen3OmniImageEncoder(model_id=model_id, device=device, dtype=dtype)
+    model = Qwen3OmniImageEncoder(model_path=model_path, device=device, dtype=dtype)
     return _create_encoder_executor(stage_name=IMAGE_STAGE, model=model, device=device)
 
 
 def create_audio_encoder_executor(
-    model_id: str,
+    model_path: str,
     *,
     device: str = "cuda",
     dtype: str | None = None,
 ) -> EngineExecutor:
-    model = Qwen3OmniAudioEncoder(model_id=model_id, device=device, dtype=dtype)
+    model = Qwen3OmniAudioEncoder(model_path=model_path, device=device, dtype=dtype)
     return _create_encoder_executor(stage_name=AUDIO_STAGE, model=model, device=device)
 
 
 def create_thinker_executor(
-    model_id: str,
+    model_path: str,
     *,
     device: str = "cuda",
     dtype: str | None = None,
     max_seq_len: int = 8192,
 ) -> EngineExecutor:
-    model = Qwen3OmniSplitThinker(model_id=model_id, device=device, dtype=dtype)
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    model = Qwen3OmniSplitThinker(model_path=model_path, device=device, dtype=dtype)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     eos_token_id = getattr(tokenizer, "eos_token_id", None)
 
     step_counters: dict[str, int] = {}
@@ -186,8 +186,8 @@ def create_thinker_executor(
     )
 
 
-def create_decode_executor(model_id: str) -> PreprocessingExecutor:
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+def create_decode_executor(model_path: str) -> PreprocessingExecutor:
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     eos_token_id = getattr(tokenizer, "eos_token_id", None)
 
     def _decode(payload: StagePayload) -> StagePayload:
