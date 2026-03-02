@@ -32,7 +32,6 @@ class RelayConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["shm", "nccl", "nixl"] = "shm"
     slot_size_mb: int = 64
     credits: int = 2
     rank: int | None = None
@@ -70,7 +69,8 @@ class PipelineConfig(BaseModel):
     model_path: str
     entry_stage: str
     stages: list[StageConfig]
-    name: str = "model"
+    name: str = "model"  # default for all
+    relay_backend: Literal["shm", "nccl", "nixl", "mooncake"] = "nccl"
     fused_stages: list[list[str]] = Field(default_factory=list)
     endpoints: EndpointsConfig = Field(default_factory=EndpointsConfig)
     completion_endpoint: str | None = None

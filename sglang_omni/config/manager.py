@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import Any
 
 import yaml
@@ -38,7 +39,8 @@ class ConfigManager:
 
             if cur_key is not None and cur_value is not None:
                 # remove the -- in front of the key
-                extra_args[cur_key.lstrip("-")] = cur_value
+                formatted_key = cur_key.lstrip("-").replace("-", "_")
+                extra_args[formatted_key] = cur_value
                 cur_key, cur_value = None, None
         return extra_args
 
@@ -71,8 +73,9 @@ class ConfigManager:
         config_data = self.config.model_dump()
         config_cls = type(self.config)
 
+        cfg_copy = deepcopy(config_data)
         for key, value in extra_args.items():
-            current = self.config.model_dump()
+            current = cfg_copy
             keys = key.split(".")
             for k in keys[:-1]:
                 # if k is an digit, treat it as an index
@@ -84,7 +87,7 @@ class ConfigManager:
             current[keys[-1]] = value
 
         # validate the configuration
-        merged_config = config_cls(**config_data)
+        merged_config = config_cls(**cfg_copy)
         return merged_config
 
     @staticmethod
