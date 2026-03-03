@@ -1,6 +1,6 @@
-from .scheduler import Scheduler
+from .scheduler import Scheduler, SchedulerConfig
 
 __all__ = [
     "Scheduler",
-    "SchedulerConfig"
+    "SchedulerConfig",
 ]

@@ -1,17 +1,12 @@
 import logging
-from typing import List
 
-from sglang_omni.vendor.sglang.core import (
-    Req,
-    ScheduleBatch,
-    ServerArgs,
-    envs,
-)
+from sglang_omni.vendor.sglang.core import ScheduleBatch, ServerArgs, envs
 
 logger = logging.getLogger(__name__)
 
 TEST_RETRACT = envs.SGLANG_TEST_RETRACT.get()
 TEST_RETRACT_INTERVAL = envs.SGLANG_TEST_RETRACT_INTERVAL.get()
+
 
 class DecodeManager:
     def __init__(
@@ -22,31 +17,30 @@ class DecodeManager:
         self.server_args = server_args
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
         self.running_batch: ScheduleBatch = ScheduleBatch(reqs=[], batch_is_full=False)
-    
+
     def schedule_next_batch(
         self,
         forward_ct: int,
-        
     ):
         if not self.runnable:
             return None
 
         initial_bs = self.running_batch.batch_size()
-        
+
         if (kv_full_retract_flag := not self.running_batch.check_decode_mem()) or (
             TEST_RETRACT and forward_ct % TEST_RETRACT_INTERVAL == 0
         ):
             old_available_tokens = self.token_to_kv_pool_allocator.available_size()
             old_ratio = self.new_token_ratio
-            retracted_reqs, new_token_ratio, reqs_to_abort = self.running_batch.retract_decode(
-                self.server_args
+            retracted_reqs, new_token_ratio, reqs_to_abort = (
+                self.running_batch.retract_decode(self.server_args)
             )
             new_available_tokens = self.token_to_kv_pool_allocator.available_size()
             new_token_gained = new_available_tokens - old_available_tokens
 
             self.num_retracted_reqs = len(retracted_reqs)
-            
-            #TODO:(ocss884) enable metrics
+
+            # TODO:(ocss884) enable metrics
             # if self.enable_metrics and len(retracted_reqs) > 0:
             #     self.metrics_collector.increment_retracted_reqs(
             #         num_retracted_reqs=len(retracted_reqs),
@@ -58,10 +52,9 @@ class DecodeManager:
             #         ),
             #     )
             self.new_token_ratio = new_token_ratio
-            
-            #TODO(ocss884): implement abort reqs
+
+            # TODO(ocss884): implement abort reqs
             # for req in reqs_to_abort:
-                
 
             msg_prefix = (
                 "KV cache pool is full. Retract requests. "
@@ -82,7 +75,7 @@ class DecodeManager:
             self.running_batch.batch_is_full = False
         self.running_batch.prepare_for_decode()
         return self.running_batch
-    
+
     @property
     def runnable(self) -> bool:
         return len(self.running_batch) > 0
