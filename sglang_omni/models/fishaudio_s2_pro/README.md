@@ -12,8 +12,7 @@ for the `fish_speech` runtime:
 
 ```bash
 # 1. Generate tokenizer.tiktoken + special_tokens.json from tokenizer.json
-#    (see scripts/convert_hf_tokenizer.py or the conversion steps in the
-#    agent transcript)
+python scripts/convert_hf_tokenizer.py /path/to/s2-pro
 
 # 2. Symlink the DAC codec from S1-Mini (same codec)
 ln -s /path/to/openaudio-s1-mini/codec.pth /path/to/s2-pro/codec.pth
