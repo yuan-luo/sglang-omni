@@ -1,23 +1,14 @@
 import logging
-import torch
-from torch.cuda import Stream as CudaStream
-from torch.cuda import StreamContext as CudaStreamContext
-from .prefill import PrefillManager
-from .decode import DecodeManager
+
+from sglang_omni.vendor.sglang.core import ModelConfig, ScheduleBatch, ServerArgs, envs
+
+from ..model_worker import ModelWorker, ModelWorkerConfig
 from .cache import CacheManager
-from ..model_worker import (
-    ModelWorker,
-    ModelWorkerConfig
-)
-from sglang_omni.vendor.sglang.core import (
-    ServerArgs,
-    ModelConfig,
-    Req,
-    envs,
-    ScheduleBatch,
-)
+from .decode import DecodeManager
+from .prefill import PrefillManager
 
 logger = logging.getLogger(__name__)
+
 
 class SchedulerConfig:
     server_args = ServerArgs
@@ -28,6 +19,7 @@ class SchedulerConfig:
 def _conver_model_worker_config(config: SchedulerConfig) -> ModelWorkerConfig:
     return ModelWorkerConfig()
 
+
 class Scheduler:
     def __init__(
         self,
@@ -35,21 +27,22 @@ class Scheduler:
     ):
         self.config = config
         self.server_args = self.config.server_args
-        self.device  = self.config.device
-        
-        
+        self.device = self.config.device
+
         # The current forward batch
         self.cur_batch = None
         # The last forward batch
         self.last_batch = None
-        
+
         # Init memory pool and cache manager
-        self.req_to_token_pool, self.token_to_kv_pool_allocator = self.tp_worker.get_memory_pool()
-        
+        self.req_to_token_pool, self.token_to_kv_pool_allocator = (
+            self.tp_worker.get_memory_pool()
+        )
+
         self.cache_manager = CacheManager()
 
         self.init_chunked_prefill()
-        
+
         # Init prefill & decode manager
         self.prefill_manager = PrefillManager(
             page_size=self.server_args.page_size,
@@ -67,7 +60,7 @@ class Scheduler:
 
         self.forward_ct = 0
         self.init_schedule_policy()
-        
+
     def init_schedule_policy(self):
         # Init schedule policy and new token estimation
         # Enable preemption for priority scheduling.
@@ -84,7 +77,7 @@ class Scheduler:
             self.init_new_token_ratio - self.min_new_token_ratio
         ) / envs.SGLANG_NEW_TOKEN_RATIO_DECAY_STEPS.get()
         self.new_token_ratio = self.init_new_token_ratio
-    
+
     def _init_model_worker(self):
         config = _conver_model_worker_config(self.config)
         self.tp_worker = ModelWorker(
@@ -93,20 +86,18 @@ class Scheduler:
             gpu_id=self.device,
             tp_rank=0,
         )
-    
+
     def init_chunked_prefill(self):
-        #TODO(ocss884): For simplicity, we disabled `dynamic chunking` and `mixed chunk` for now
+        # TODO(ocss884): For simplicity, we disabled `dynamic chunking` and `mixed chunk` for now
         self.chunked_prefill_size = self.server_args.chunked_prefill_size
-        
-    
+
     def init_overlap(self):
-        #TODO(ocss884): implement overlap scheduling
+        # TODO(ocss884): implement overlap scheduling
         raise NotImplementedError
 
     def recv_requests():
         pass
-        
-        
+
     def normal_loop(self) -> None:
         """A normal scheduler loop."""
         while True:
@@ -115,23 +106,22 @@ class Scheduler:
 
             batch = self.get_next_batch_to_run(batch)
             self.cur_batch = batch
-            
+
             if batch:
                 result = self.run_batch(batch)
                 self.process_batch_result(batch, result)
-                
+
             self.last_batch = batch
 
-
     def process_batch_result(self, batch, result):
-        #TODO(ocss884): implement result processing, including sending output to tokenizer and updating cache
+        # TODO(ocss884): implement result processing, including sending output to tokenizer and updating cache
         pass
-    
+
     def get_next_batch_to_run(self):
         # TODO(ocss884): maybe support more scheduling strategies
 
         chunked_req_to_exclude = set()
-        
+
         if self.last_batch and self.last_batch.forward_mode.is_extend():
             if self.last_batch.chunked_req is not None:
                 # In the context pipeline parallelism, after the last chunk, the current microbatch still track outdated chunked_req.
@@ -155,14 +145,15 @@ class Scheduler:
                     # Merge running_batch with prefill batch
                     self.running_batch.merge_batch(self.last_batch)
 
-        
         running_bs = len(self.decode_manager.running_batch)
         num_allocatable_reqs = self.get_num_allocatable_reqs(running_bs)
 
-        if next_batch := self.prefill_manager.schedule_next_batch(
-            self.decode_manager.running_batch,
-            num_allocatable_reqs
-        ) is not None:
+        if (
+            next_batch := self.prefill_manager.schedule_next_batch(
+                self.decode_manager.running_batch, num_allocatable_reqs
+            )
+            is not None
+        ):
             ret = next_batch
         elif self.decode_manager.runnable:
             ret = self.decode_manager.schedule_next_batch(self.forward_ct)
@@ -176,13 +167,14 @@ class Scheduler:
         return ret
 
     def get_num_allocatable_reqs(self, running_bs):
-        #NOTE(ocss884): cp from sglang but removed pp
+        # NOTE(ocss884): cp from sglang but removed pp
         res = self.server_args.max_running_requests - running_bs
         return res
-    
-    #TODO(ocss884): fix it
+
+    # TODO(ocss884): fix it
     def run_batch(batch: ScheduleBatch):
         raise NotImplementedError
+
 
 def launch_scheduler(config: SchedulerConfig):
     scheduler = Scheduler(config)
