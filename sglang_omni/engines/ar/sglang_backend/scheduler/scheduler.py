@@ -95,7 +95,7 @@ class Scheduler:
         )
     
     def init_chunked_prefill(self):
-        #TODO(ocs884): For simplicity, we disabled `dynamic chunking` and `mixed chunk` for now
+        #TODO(ocss884): For simplicity, we disabled `dynamic chunking` and `mixed chunk` for now
         self.chunked_prefill_size = self.server_args.chunked_prefill_size
         
     
