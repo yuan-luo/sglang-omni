@@ -20,7 +20,7 @@ from transformers.utils.hub import cached_file
 
 @lru_cache(maxsize=8)
 def load_hf_config(
-    model_id: str,
+    model_path: str,
     *,
     trust_remote_code: bool = True,
     local_files_only: bool = True,
@@ -28,7 +28,7 @@ def load_hf_config(
     """Load the HF config, preferring the local cache."""
     try:
         config_path = cached_file(
-            model_id, "config.json", local_files_only=local_files_only
+            model_path, "config.json", local_files_only=local_files_only
         )
         cfg = AutoConfig.from_pretrained(
             str(Path(config_path).parent),
@@ -36,7 +36,9 @@ def load_hf_config(
             local_files_only=local_files_only,
         )
     except Exception:
-        cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+        cfg = AutoConfig.from_pretrained(
+            model_path, trust_remote_code=trust_remote_code
+        )
     return cfg
 
 

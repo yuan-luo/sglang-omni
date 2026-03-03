@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
 
 async def main_async(args: argparse.Namespace) -> None:
     config = create_text_first_pipeline_config(
-        model_id=args.model_id,
+        model_path=args.model_path,
         preprocessing_device=args.preprocessing_device,
         image_device=args.image_device,
         audio_device=args.audio_device,

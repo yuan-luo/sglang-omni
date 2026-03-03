@@ -25,11 +25,9 @@ Export a config to JSON::
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import time
-from pathlib import Path
 from typing import Any
 
 import uvicorn
@@ -195,17 +193,3 @@ def launch_server(
             client_kwargs=client_kwargs,
         )
     )
-
-
-def load_pipeline_config(path: str | Path) -> PipelineConfig:
-    """Load a PipelineConfig from a JSON file.
-
-    Args:
-        path: Path to a JSON file containing a valid PipelineConfig.
-
-    Returns:
-        Parsed PipelineConfig instance.
-    """
-    text = Path(path).read_text(encoding="utf-8")
-    data = json.loads(text)
-    return PipelineConfig(**data)

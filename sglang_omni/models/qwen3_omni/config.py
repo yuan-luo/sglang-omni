@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from sglang_omni.config import (
     ExecutorConfig,
@@ -97,14 +97,6 @@ class Qwen3OmniPipelineConfig(PipelineConfig):
             relay=RelayConfig(device="cpu"),
         ),
     ]
-
-    def model_post_init(self, __context: Any = None) -> None:
-        super().model_post_init(__context)
-
-        # TODO: we need to refactor this factory pattern to avoid
-        for stage in self.stages:
-            if stage.name != AGGREGATE_STAGE:
-                stage.executor.args["model_id"] = self.model_path
 
 
 EntryClass = Qwen3OmniPipelineConfig
