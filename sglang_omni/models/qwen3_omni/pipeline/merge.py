@@ -7,7 +7,12 @@ from typing import Any, Iterable
 
 import torch
 
-from sglang_omni.models.qwen3_omni.io import OmniEvent, PipelineState, ThinkerOutput
+from sglang_omni.models.qwen3_omni.io import (
+    OmniEvent,
+    PipelineState,
+    TalkerOutput,
+    ThinkerOutput,
+)
 from sglang_omni.models.qwen3_omni.pipeline.next_stage import AUDIO_STAGE, IMAGE_STAGE
 from sglang_omni.proto import StagePayload
 
@@ -314,3 +319,72 @@ def decode_events(
             type="text_delta", modality="text", payload={"text": delta}, is_final=False
         )
     ]
+
+
+# ---------------------------------------------------------------------------
+# Talker merge / decode helpers
+# ---------------------------------------------------------------------------
+
+
+def merge_for_talker(payloads: dict[str, StagePayload]) -> StagePayload:
+    """Extract thinker hidden states and build talker_inputs on PipelineState.
+
+    The thinker stage stores captured hidden states (layer 0 embedding and
+    layer N hidden) in ``thinker_out.extra_model_outputs``.  This function
+    unpacks them into ``state.talker_inputs`` for the talker engine.
+    """
+    base = next(iter(payloads.values()))
+    state = PipelineState.from_dict(base.data)
+
+    thinker_out = state.thinker_out
+    if not isinstance(thinker_out, dict):
+        raise ValueError(
+            "merge_for_talker requires thinker_out on PipelineState, "
+            "but got None. Ensure the thinker stage completed before "
+            "routing to the talker."
+        )
+
+    extra = thinker_out.get("extra_model_outputs", {})
+    thinker_embed = extra.get("thinker_embed")
+    thinker_hidden = extra.get("thinker_hidden")
+    is_multimodal_mask = extra.get("is_multimodal_mask")
+
+    state.talker_inputs = {
+        "thinker_embed": thinker_embed,
+        "thinker_hidden": thinker_hidden,
+        "is_multimodal_mask": is_multimodal_mask,
+    }
+    base.data = state.to_dict()
+    return base
+
+
+def decode_codec_events(
+    *,
+    talker_out: TalkerOutput,
+    step: int,
+) -> Iterable[OmniEvent]:
+    """Convert talker codec output into streaming OmniEvents."""
+    codec_codes = talker_out.get("codec_codes", [])
+    is_final = bool(talker_out.get("is_final"))
+
+    if is_final and codec_codes:
+        return [
+            OmniEvent(
+                type="codec_final",
+                modality="audio",
+                payload={"codec_codes": codec_codes},
+                is_final=True,
+            )
+        ]
+
+    if codec_codes:
+        return [
+            OmniEvent(
+                type="codec_chunk",
+                modality="audio",
+                payload={"codec_codes": codec_codes, "step": step},
+                is_final=False,
+            )
+        ]
+
+    return []

@@ -39,6 +39,15 @@ _SGLANG_EXPORTS = {
     "SGLangModelRunner",
 }
 
+_TALKER_EXPORTS = {
+    "TalkerARRequestData",
+    "TalkerBatchPlanner",
+    "TalkerResourceManager",
+    "TalkerOutputProcessor",
+    "TalkerIterationController",
+    "TalkerModelRunner",
+}
+
 __all__ = [
     # Protocols
     "BatchPlanner",
@@ -70,6 +79,13 @@ __all__ = [
     "SGLangOutputProcessor",
     "SGLangIterationController",
     "SGLangModelRunner",
+    # Talker
+    "TalkerARRequestData",
+    "TalkerBatchPlanner",
+    "TalkerResourceManager",
+    "TalkerOutputProcessor",
+    "TalkerIterationController",
+    "TalkerModelRunner",
 ]
 
 
@@ -78,4 +94,8 @@ def __getattr__(name: str):
         from . import sglang_ar
 
         return getattr(sglang_ar, name)
+    if name in _TALKER_EXPORTS:
+        from . import sglang_talker
+
+        return getattr(sglang_talker, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

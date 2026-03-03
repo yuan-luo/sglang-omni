@@ -13,6 +13,7 @@ from sglang_omni.engines.omni import (
     create_ar_engine,
     create_encoder_engine,
     create_sglang_ar_engine,
+    create_sglang_talker_engine,
 )
 from sglang_omni.executors import EngineExecutor, PreprocessingExecutor
 from sglang_omni.models.qwen3_omni.components.audio_encoder import Qwen3OmniAudioEncoder
@@ -22,15 +23,21 @@ from sglang_omni.models.qwen3_omni.components.thinker import Qwen3OmniSplitThink
 from sglang_omni.models.qwen3_omni.io import OmniEvent, ThinkerOutput
 from sglang_omni.models.qwen3_omni.pipeline.engine_io import (
     apply_encoder_result,
+    apply_talker_result,
     apply_thinker_result,
     build_encoder_request,
+    build_sglang_talker_request,
     build_sglang_thinker_request,
     build_thinker_request,
 )
-from sglang_omni.models.qwen3_omni.pipeline.merge import decode_events
+from sglang_omni.models.qwen3_omni.pipeline.merge import (
+    decode_codec_events,
+    decode_events,
+)
 from sglang_omni.models.qwen3_omni.pipeline.next_stage import (
     AUDIO_STAGE,
     IMAGE_STAGE,
+    TALKER_STAGE,
     THINKER_STAGE,
 )
 from sglang_omni.models.qwen3_omni.pipeline.state_io import load_state, store_state
@@ -136,7 +143,7 @@ def create_thinker_executor(
 
         try:
             token_id = int(item)
-        except Exception:
+        except (ValueError, TypeError):
             return {"token_id": item, "step": step}
 
         state = load_state(payload)
@@ -231,7 +238,7 @@ def create_sglang_thinker_executor(
 
         try:
             token_id = int(item)
-        except Exception:
+        except (ValueError, TypeError):
             return {"token_id": item, "step": step}
 
         state = load_state(payload)
@@ -261,9 +268,14 @@ def create_sglang_thinker_executor(
             "stage": THINKER_STAGE,
         }
 
+    # Capture thinker layer 0 (embedding) and layer 24 (accept_hidden_layer)
+    # for relay to the talker stage
+    capture_hidden_layers = [0, 24]
+
     engine = create_sglang_ar_engine(
         server_args=server_args,
         gpu_id=gpu_id,
+        capture_hidden_layers=capture_hidden_layers,
     )
 
     return EngineExecutor(
@@ -310,55 +322,197 @@ def create_sglang_thinker_executor_from_config(
     )
 
 
+def create_sglang_talker_executor(
+    talker_model: Any,
+    *,
+    model_worker: Any | None = None,
+    gpu_id: int = 0,
+) -> EngineExecutor:
+    """Create a talker executor backed by the Qwen3OmniTalker model."""
+
+    def _request_builder(payload: StagePayload):
+        state = load_state(payload)
+        return build_sglang_talker_request(
+            state,
+            params=payload.request.params,
+            request_id=payload.request_id,
+        )
+
+    def _result_builder(payload: StagePayload, result: Any) -> StagePayload:
+        state = load_state(payload)
+        apply_talker_result(state, stage_name=TALKER_STAGE, result=result)
+        return store_state(payload, state)
+
+    def _stream_builder(payload: StagePayload | None, item: Any) -> Any:
+        if payload is None:
+            return None
+        if not isinstance(item, dict):
+            return {"codec_output": item}
+        codec_codes = item.get("codec_codes")
+        if codec_codes is None:
+            return item
+        from sglang_omni.models.qwen3_omni.io import TalkerOutput
+
+        talker_out: TalkerOutput = {
+            "codec_codes": (
+                codec_codes.tolist() if hasattr(codec_codes, "tolist") else codec_codes
+            ),
+            "step": 1,
+            "is_final": True,
+        }
+        events = list(decode_codec_events(talker_out=talker_out, step=1))
+        return {
+            "events": [_event_to_dict(event) for event in events],
+            "stage": TALKER_STAGE,
+        }
+
+    engine = create_sglang_talker_engine(
+        talker_model=talker_model,
+        model_worker=model_worker,
+        gpu_id=gpu_id,
+    )
+
+    return EngineExecutor(
+        engine=engine,
+        request_builder=_request_builder,
+        result_builder=_result_builder,
+        stream_builder=_stream_builder,
+    )
+
+
+def create_sglang_talker_executor_from_config(
+    model_path: str,
+    *,
+    gpu_id: int = 0,
+    talker_max_seq_len: int = 4096,
+    server_args_overrides: dict[str, Any] | None = None,
+) -> EngineExecutor:
+    """Create a talker executor from JSON-serializable config args.
+
+    Loads the Qwen3OmniTalker model and optionally creates a SGLang
+    ModelWorker for ForwardBatch infrastructure.
+    """
+    from sglang_omni.models.qwen3_omni.talker import Qwen3OmniTalker
+
+    talker_config = _load_talker_config(model_path)
+    talker_model = Qwen3OmniTalker(talker_config)
+
+    checkpoint_weights = _load_checkpoint_weights(model_path)
+    talker_model.load_weights(checkpoint_weights)
+    talker_model = talker_model.to(f"cuda:{gpu_id}").eval()
+
+    return create_sglang_talker_executor(
+        talker_model=talker_model,
+        model_worker=None,
+        gpu_id=gpu_id,
+    )
+
+
+def _load_talker_config(model_path: str) -> Any:
+    """Load talker config from model path."""
+    import json
+    import os
+
+    from sglang_omni.config.qwen3_omni import Qwen3OmniMoeTalkerConfig
+
+    config_path = os.path.join(model_path, "config.json")
+    if not os.path.exists(config_path):
+        return Qwen3OmniMoeTalkerConfig()
+
+    with open(config_path) as f:
+        raw_config = json.load(f)
+
+    talker_cfg = raw_config.get("talker", {})
+    return Qwen3OmniMoeTalkerConfig(**talker_cfg)
+
+
+def _load_checkpoint_weights(model_path: str) -> list[tuple[str, torch.Tensor]]:
+    """Load checkpoint weights from safetensors or pytorch files."""
+    import glob
+    import os
+
+    from safetensors.torch import load_file
+
+    weights: list[tuple[str, torch.Tensor]] = []
+    safetensor_files = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
+
+    for sf_path in safetensor_files:
+        state_dict = load_file(sf_path)
+        for name, tensor in state_dict.items():
+            weights.append((name, tensor))
+
+    return weights
+
+
 def create_decode_executor(model_path: str) -> PreprocessingExecutor:
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     eos_token_id = getattr(tokenizer, "eos_token_id", None)
 
     def _decode(payload: StagePayload) -> StagePayload:
         state = load_state(payload)
+        events: list[OmniEvent] = []
+        result: dict[str, Any] = {}
+
+        # Decode thinker text output
         thinker_out = state.thinker_out or state.engine_outputs.get(THINKER_STAGE)
-        if not isinstance(thinker_out, dict):
-            thinker_out = {
-                "output_ids": [],
-                "step": 0,
-                "is_final": True,
-                "extra_model_outputs": {},
-            }
-
-        step = int(thinker_out.get("step") or len(thinker_out.get("output_ids", [])))
-        events = list(
-            decode_events(
-                thinker_out=thinker_out,
-                state=state,
-                tokenizer=tokenizer,
-                eos_token_id=eos_token_id,
-                step=step,
+        if isinstance(thinker_out, dict):
+            step = int(
+                thinker_out.get("step") or len(thinker_out.get("output_ids", []))
             )
-        )
-        event_dicts = [_event_to_dict(event) for event in events]
+            text_events = list(
+                decode_events(
+                    thinker_out=thinker_out,
+                    state=state,
+                    tokenizer=tokenizer,
+                    eos_token_id=eos_token_id,
+                    step=step,
+                )
+            )
+            events.extend(text_events)
 
-        result: dict[str, Any] = {"events": event_dicts}
+            if "text" not in result:
+                output_ids = thinker_out.get("output_ids")
+                if (
+                    callable(getattr(tokenizer, "decode", None))
+                    and isinstance(output_ids, list)
+                    and output_ids
+                ):
+                    result["text"] = tokenizer.decode(
+                        output_ids, skip_special_tokens=True
+                    )
+                    result.setdefault("modality", "text")
+
+        # Decode talker codec output
+        talker_out = state.talker_out or state.engine_outputs.get(TALKER_STAGE)
+        if isinstance(talker_out, dict):
+            codec_events = list(
+                decode_codec_events(
+                    talker_out=talker_out,
+                    step=int(talker_out.get("step", 0)),
+                )
+            )
+            events.extend(codec_events)
+
+            codec_codes = talker_out.get("codec_codes")
+            if codec_codes:
+                result["codec_codes"] = codec_codes
+                result.setdefault("modality", "audio")
+
+        event_dicts = [_event_to_dict(event) for event in events]
+        result["events"] = event_dicts
+
         final_event = next(
             (
                 event
                 for event in reversed(events)
-                if event.is_final or event.type in {"text_final", "final"}
+                if event.is_final
+                or event.type in {"text_final", "codec_final", "final"}
             ),
             None,
         )
         if final_event is not None:
             result.update(final_event.payload)
             result.setdefault("modality", final_event.modality)
-
-        if "text" not in result:
-            output_ids = thinker_out.get("output_ids")
-            if (
-                callable(getattr(tokenizer, "decode", None))
-                and isinstance(output_ids, list)
-                and output_ids
-            ):
-                result["text"] = tokenizer.decode(output_ids, skip_special_tokens=True)
-                result.setdefault("modality", "text")
 
         payload.data = result
         return payload

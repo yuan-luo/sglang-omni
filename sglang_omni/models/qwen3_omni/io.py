@@ -34,6 +34,14 @@ class ThinkerOutput(TypedDict, total=False):
     extra_model_outputs: dict[str, Any]
 
 
+class TalkerOutput(TypedDict, total=False):
+    """Normalized talker output containing codec codes for audio generation."""
+
+    codec_codes: list[list[int]]  # [num_code_groups, seq_len]
+    step: int
+    is_final: bool
+
+
 @dataclass
 class PipelineState:
     """Typed view of the per-request pipeline state.
@@ -49,6 +57,8 @@ class PipelineState:
     encoder_outs: dict[str, Any] = field(default_factory=dict)
     thinker_inputs: dict[str, Any] = field(default_factory=dict)
     thinker_out: ThinkerOutput | None = None
+    talker_inputs: dict[str, Any] = field(default_factory=dict)
+    talker_out: TalkerOutput | None = None
     engine_outputs: dict[str, Any] = field(default_factory=dict)
     stream_state: dict[str, Any] = field(default_factory=dict)
 
@@ -60,9 +70,11 @@ class PipelineState:
         encoder_inputs = data.get("encoder_inputs")
         encoder_outs = data.get("encoder_outs")
         thinker_inputs = data.get("thinker_inputs")
+        talker_inputs = data.get("talker_inputs")
         engine_outputs = data.get("engine_outputs")
         stream_state = data.get("stream_state")
         thinker_out = data.get("thinker_out")
+        talker_out = data.get("talker_out")
         return cls(
             raw_inputs=data.get("raw_inputs"),
             prompt=data.get("prompt"),
@@ -71,6 +83,8 @@ class PipelineState:
             encoder_outs=encoder_outs if isinstance(encoder_outs, dict) else {},
             thinker_inputs=thinker_inputs if isinstance(thinker_inputs, dict) else {},
             thinker_out=thinker_out if isinstance(thinker_out, dict) else None,
+            talker_inputs=talker_inputs if isinstance(talker_inputs, dict) else {},
+            talker_out=talker_out if isinstance(talker_out, dict) else None,
             engine_outputs=engine_outputs if isinstance(engine_outputs, dict) else {},
             stream_state=stream_state if isinstance(stream_state, dict) else {},
         )
@@ -91,6 +105,10 @@ class PipelineState:
             data["thinker_inputs"] = self.thinker_inputs
         if self.thinker_out is not None:
             data["thinker_out"] = self.thinker_out
+        if self.talker_inputs:
+            data["talker_inputs"] = self.talker_inputs
+        if self.talker_out is not None:
+            data["talker_out"] = self.talker_out
         if self.engine_outputs:
             data["engine_outputs"] = self.engine_outputs
         if self.stream_state:
@@ -103,6 +121,8 @@ OmniEventType = Literal[
     "text_final",
     "audio_chunk",
     "audio_final",
+    "codec_chunk",
+    "codec_final",
     "image",
     "video_chunk",
     "video_final",

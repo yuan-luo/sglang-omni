@@ -18,6 +18,7 @@ from sglang_omni.models.qwen3_omni.pipeline.next_stage import (
     DECODE_STAGE,
     IMAGE_STAGE,
     PREPROCESSING_STAGE,
+    TALKER_STAGE,
     THINKER_STAGE,
 )
 
@@ -83,6 +84,17 @@ class Qwen3OmniPipelineConfig(PipelineConfig):
                 },
             ),
             get_next="sglang_omni.models.qwen3_omni.pipeline.next_stage.thinker_next",
+            relay=RelayConfig(device="cuda"),
+        ),
+        StageConfig(
+            name=TALKER_STAGE,
+            executor=ExecutorConfig(
+                factory="sglang_omni.models.qwen3_omni.pipeline.stages.create_sglang_talker_executor_from_config",
+                args={
+                    "talker_max_seq_len": 4096,
+                },
+            ),
+            get_next="sglang_omni.models.qwen3_omni.pipeline.next_stage.talker_next",
             relay=RelayConfig(device="cuda"),
         ),
         StageConfig(

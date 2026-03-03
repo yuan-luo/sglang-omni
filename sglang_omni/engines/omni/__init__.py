@@ -2,7 +2,12 @@
 """OmniEngine - unified engine for all model types."""
 
 from .engine import OmniEngine
-from .factory import create_ar_engine, create_encoder_engine, create_sglang_ar_engine
+from .factory import (
+    create_ar_engine,
+    create_encoder_engine,
+    create_sglang_ar_engine,
+    create_sglang_talker_engine,
+)
 from .model_runner import ModelRunner
 from .runtime.ar import ARRequestData
 from .runtime.encoder import EncoderRequestData
@@ -35,12 +40,23 @@ __all__ = [
     # AR (SGLang)
     "SGLangARRequestData",
     "create_sglang_ar_engine",
+    # Talker
+    "TalkerARRequestData",
+    "create_sglang_talker_engine",
 ]
 
 
-def __getattr__(name: str):
-    if name == "SGLangARRequestData":
-        from .runtime.sglang_ar import SGLangARRequestData
+_LAZY_EXPORTS = {
+    "SGLangARRequestData": ".runtime.sglang_ar",
+    "TalkerARRequestData": ".runtime.sglang_talker",
+}
 
-        return SGLangARRequestData
+
+def __getattr__(name: str):
+    module_path = _LAZY_EXPORTS.get(name)
+    if module_path is not None:
+        import importlib
+
+        mod = importlib.import_module(module_path, package=__name__)
+        return getattr(mod, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

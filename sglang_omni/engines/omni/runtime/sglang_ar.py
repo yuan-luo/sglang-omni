@@ -9,7 +9,7 @@ DecodeManager, and ModelWorker.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -49,6 +49,7 @@ class SGLangARRequestData(ARRequestData):
 
     req: Any = None
     synced: bool = False
+    hidden_states_buffer: dict[int, list[torch.Tensor]] = field(default_factory=dict)
 
 
 # -----------------------------------------------------------------------------
@@ -340,7 +341,12 @@ class SGLangIterationController:
     chunked prefill — decrement counter, do NOT append token or check finish.
     """
 
-    def __init__(self, tree_cache):
+    HIDDEN_LAYER_KEY_MAP: dict[int, str] = {
+        0: "thinker_embed",
+        24: "thinker_hidden",
+    }
+
+    def __init__(self, tree_cache: Any) -> None:
         self.tree_cache = tree_cache
 
     def update_request(self, request: SchedulerRequest, output: RequestOutput) -> None:
@@ -365,7 +371,108 @@ class SGLangIterationController:
                 self.tree_cache.cache_unfinished_req(req)
 
     def is_finished(self, request: SchedulerRequest, output: RequestOutput) -> bool:
-        return request.data.req.finished()
+        is_done = request.data.req.finished()
+        if is_done:
+            self._finalize_hidden_states(request)
+        return is_done
+
+    def _finalize_hidden_states(self, request: SchedulerRequest) -> None:
+        """Concatenate accumulated hidden state chunks into final tensors.
+
+        Stores results as ``thinker_embed`` and ``thinker_hidden`` in
+        ``request.data.extra_model_outputs`` for relay to the talker stage.
+        """
+        data: SGLangARRequestData = request.data
+        if not data.hidden_states_buffer:
+            return
+
+        for layer_idx, chunks in data.hidden_states_buffer.items():
+            key = self.HIDDEN_LAYER_KEY_MAP.get(layer_idx, f"hidden_layer_{layer_idx}")
+            if chunks:
+                data.extra_model_outputs[key] = torch.cat(chunks, dim=0)
+        data.hidden_states_buffer.clear()
+
+
+# -----------------------------------------------------------------------------
+# Hidden State Capture via Forward Hooks
+# -----------------------------------------------------------------------------
+
+
+class HiddenStateCaptureHook:
+    """Captures intermediate hidden states from specific decoder layers.
+
+    Uses register_forward_hook on decoder layers to capture output tensors.
+    NOT thread-safe: hook execution and ``pop_captured()`` must be called
+    from the same thread (the model forward thread).
+    """
+
+    def __init__(self) -> None:
+        self._captured: dict[int, torch.Tensor] = {}
+        self._handles: list[Any] = []
+
+    def register(self, model: Any, layer_indices: list[int]) -> None:
+        """Register hooks on specific decoder layers of the thinker model.
+
+        Args:
+            model: The thinker text model (Qwen3OmniMoeThinkerTextModel)
+                   Expected to have model.layers attribute.
+            layer_indices: Layer indices to capture (e.g., [0, 24]).
+        """
+        layers = _get_model_layers(model)
+        if layers is None:
+            logger.warning("Cannot find model layers for hidden state capture")
+            return
+
+        for idx in layer_indices:
+            if idx >= len(layers):
+                logger.warning(
+                    "Layer index %d out of range (model has %d layers)",
+                    idx,
+                    len(layers),
+                )
+                continue
+            handle = layers[idx].register_forward_hook(self._make_hook(idx))
+            self._handles.append(handle)
+
+    def _make_hook(self, layer_idx: int):
+        def _hook(module: Any, input_args: Any, output: Any) -> None:
+            if isinstance(output, tuple) and len(output) >= 1:
+                hidden = output[0]
+            elif isinstance(output, torch.Tensor):
+                hidden = output
+            else:
+                return
+            self._captured[layer_idx] = hidden.detach()
+
+        return _hook
+
+    def pop_captured(self) -> dict[int, torch.Tensor]:
+        """Return and clear captured hidden states from the last forward pass."""
+        captured = self._captured
+        self._captured = {}
+        return captured
+
+    def remove_hooks(self) -> None:
+        for handle in self._handles:
+            handle.remove()
+        self._handles.clear()
+
+
+def _get_model_layers(model: Any) -> Any | None:
+    """Navigate model wrapper to find the decoder layers list."""
+    # SGLang ModelRunner wraps model in model_runner.model
+    candidates = [
+        model,
+        getattr(model, "model", None),
+        getattr(getattr(model, "model", None), "model", None),
+    ]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        layers = getattr(candidate, "layers", None)
+        if layers is not None and hasattr(layers, "__len__"):
+            return layers
+    return None
 
 
 # -----------------------------------------------------------------------------
@@ -378,6 +485,9 @@ class SGLangModelRunner:
 
     Replaces the generic ModelRunner — handles ScheduleBatch → ForwardBatch
     conversion, forward pass, and conditional sampling.
+
+    Optionally captures intermediate hidden states via forward hooks for
+    thinker-to-talker relay.
     """
 
     def __init__(
@@ -385,10 +495,18 @@ class SGLangModelRunner:
         model_worker: "ModelWorker",
         output_processor: SGLangOutputProcessor,
         batch_planner: SGLangBatchPlanner | None = None,
+        capture_hidden_layers: list[int] | None = None,
     ):
         self.model_worker = model_worker
         self.output_processor = output_processor
         self.batch_planner = batch_planner
+        self._hidden_hook: HiddenStateCaptureHook | None = None
+
+        if capture_hidden_layers:
+            self._hidden_hook = HiddenStateCaptureHook()
+            self._hidden_hook.register(
+                model_worker.model_runner.model, capture_hidden_layers
+            )
 
     def execute(self, scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
         from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -408,6 +526,12 @@ class SGLangModelRunner:
 
         # 3. Forward pass
         batch_result = self.model_worker.forward_batch_generation(forward_batch)
+
+        # 3a. Capture hidden states if hooks are registered
+        if self._hidden_hook is not None:
+            captured = self._hidden_hook.pop_captured()
+            if captured:
+                self._store_captured_hidden(captured, scheduler_output, schedule_batch)
 
         # 4. Produce per-request next tokens and store them on ScheduleBatch.
         # Decode preparation relies on schedule_batch.output_ids from the
@@ -439,3 +563,30 @@ class SGLangModelRunner:
             req_ids=req_ids,
             req_id_to_index=req_id_to_index,
         )
+
+    def _store_captured_hidden(
+        self,
+        captured: dict[int, torch.Tensor],
+        scheduler_output: SchedulerOutput,
+        schedule_batch: Any,
+    ) -> None:
+        """Accumulate captured hidden states onto per-request data buffers.
+
+        Each captured tensor has shape [total_tokens, hidden_size].  For
+        batched prefill / decode the tokens are concatenated across requests
+        in ScheduleBatch order.  We slice per-request using seq_lens.
+        """
+        seq_lens = list(schedule_batch.seq_lens)
+        offsets: list[int] = []
+        running_offset = 0
+        for length in seq_lens:
+            offsets.append(running_offset)
+            running_offset += int(length)
+
+        for i, sched_req in enumerate(scheduler_output.requests):
+            data: SGLangARRequestData = sched_req.data
+            start = offsets[i]
+            end = start + int(seq_lens[i])
+            for layer_idx, tensor in captured.items():
+                buf = data.hidden_states_buffer.setdefault(layer_idx, [])
+                buf.append(tensor[start:end].clone())

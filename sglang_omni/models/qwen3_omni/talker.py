@@ -21,7 +21,6 @@ from sglang_omni.config.qwen3_omni import (
 
 # Reuse Thinker's components
 from sglang_omni.models.qwen3_omni.thinker import (
-    Qwen3OmniMoeThinkerTextAttention,
     Qwen3OmniMoeThinkerTextDecoderLayer,
     Qwen3OmniMoeThinkerTextSparseMoeBlock,
 )
@@ -38,6 +37,13 @@ from sglang_omni.vendor.sglang.layers import (
     top_k_top_p_sampling_from_probs,
 )
 from sglang_omni.vendor.sglang.utils import make_layers
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+CODE_PREDICTOR_TOP_K = 50
+CODE_PREDICTOR_TOP_P = 0.8
 
 # ---------------------------------------------------------------------------
 # Common building blocks
@@ -344,6 +350,137 @@ class Qwen3OmniMoeTalkerTextModel(nn.Module):
 # ---------------------------------------------------------------------------
 
 
+def _build_rope_cache(
+    seq_len: int,
+    head_dim: int,
+    theta: float,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Precompute rotary position embedding cos/sin tables."""
+    inv_freq = 1.0 / (
+        theta
+        ** (torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim)
+    )
+    positions = torch.arange(seq_len, device=device, dtype=torch.float32)
+    freqs = torch.outer(positions, inv_freq)  # [seq_len, head_dim/2]
+    cos_cached = freqs.cos()  # [seq_len, head_dim/2]
+    sin_cached = freqs.sin()  # [seq_len, head_dim/2]
+    return cos_cached, sin_cached
+
+
+def _apply_rotary_emb(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    """Apply rotary position embeddings to Q or K tensor.
+
+    Args:
+        x: [batch, heads, seq_len, head_dim]
+        cos: [seq_len, head_dim/2]
+        sin: [seq_len, head_dim/2]
+    """
+    half = x.shape[-1] // 2
+    x1 = x[..., :half]
+    x2 = x[..., half:]
+    cos = cos.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, head_dim/2]
+    sin = sin.unsqueeze(0).unsqueeze(0)
+    return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
+
+
+class _CausalSelfAttention(nn.Module):
+    """Lightweight causal self-attention with RoPE for the code predictor.
+
+    Uses standard scaled dot-product attention instead of RadixAttention.
+    Code predictor sequences are very short (2-17 tokens), so paged KV
+    cache is unnecessary and would require a ForwardBatch we don't have.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        rope_theta: float = 1000000.0,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.num_kv_groups = num_heads // num_kv_heads
+        self.rope_theta = rope_theta
+
+        self.qkv_proj = nn.Linear(
+            hidden_size,
+            (num_heads + 2 * num_kv_heads) * head_dim,
+            bias=False,
+        )
+        self.o_proj = nn.Linear(num_heads * head_dim, hidden_size, bias=False)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, seq_len, _ = hidden_states.shape
+        q, k, v = self._split_qkv(hidden_states, batch_size, seq_len)
+        q, k = self._apply_rope(q, k, seq_len)
+
+        if self.num_kv_groups > 1:
+            k = k.repeat_interleave(self.num_kv_groups, dim=1)
+            v = v.repeat_interleave(self.num_kv_groups, dim=1)
+
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, is_causal=True
+        )
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, seq_len, -1)
+        return self.o_proj(attn_output)
+
+    def _split_qkv(
+        self,
+        hidden_states: torch.Tensor,
+        batch_size: int,
+        seq_len: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split QKV projection into Q, K, V and reshape to head layout."""
+        qkv = self.qkv_proj(hidden_states)
+        q_size = self.num_heads * self.head_dim
+        kv_size = self.num_kv_heads * self.head_dim
+        q = (
+            qkv[..., :q_size]
+            .view(batch_size, seq_len, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+        )
+        k = (
+            qkv[..., q_size : q_size + kv_size]
+            .view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+            .transpose(1, 2)
+        )
+        v = (
+            qkv[..., q_size + kv_size :]
+            .view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+            .transpose(1, 2)
+        )
+        return q, k, v
+
+    def _apply_rope(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        seq_len: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply rotary position embeddings to Q and K."""
+        cos, sin = _build_rope_cache(seq_len, self.head_dim, self.rope_theta, q.device)
+        q = _apply_rotary_emb(q, cos, sin)
+        k = _apply_rotary_emb(k, cos, sin)
+        return q, k
+
+
 class Qwen3OmniMoeTalkerCodePredictor(nn.Module):
     """Code predictor for generating RVQ codes (layers 1 to N-1, N=num_code_groups).
 
@@ -352,6 +489,10 @@ class Qwen3OmniMoeTalkerCodePredictor(nn.Module):
     - code_predictor.model.layers: ModuleList[num_layers]     (5 dense decoder layers)
     - code_predictor.model.norm: RMSNorm
     - code_predictor.lm_head: ModuleList[N-1]                 (15 output heads)
+
+    Uses standard causal self-attention instead of RadixAttention, since the
+    code predictor runs on very short sequences (2-17 tokens) and does not
+    need paged KV cache.
     """
 
     def __init__(
@@ -375,34 +516,22 @@ class Qwen3OmniMoeTalkerCodePredictor(nn.Module):
             ]
         )
 
-        # 5 dense decoder layers
-        alt_stream = torch.cuda.Stream()
+        # 5 dense decoder layers with standard causal attention (no RadixAttention)
         self.model.layers = nn.ModuleList()
         for idx in range(cp_config.num_hidden_layers):
-            # Create a decoder layer similar to Thinker but with dense MLP
             layer = nn.Module()
-            layer.self_attn = Qwen3OmniMoeThinkerTextAttention(
+            layer.self_attn = _CausalSelfAttention(
                 hidden_size=cp_config.hidden_size,
                 num_heads=cp_config.num_attention_heads,
                 num_kv_heads=cp_config.num_key_value_heads,
-                layer_id=idx,
-                rope_theta=getattr(cp_config, "rope_theta", 1000000.0),
-                rope_scaling=getattr(cp_config, "rope_scaling", None),
-                max_position_embeddings=getattr(
-                    cp_config, "max_position_embeddings", 32768
-                ),
                 head_dim=getattr(
                     cp_config,
                     "head_dim",
                     cp_config.hidden_size // cp_config.num_attention_heads,
                 ),
-                rms_norm_eps=cp_config.rms_norm_eps,
-                attention_bias=cp_config.attention_bias,
-                config=cp_config,
+                rope_theta=getattr(cp_config, "rope_theta", 1000000.0),
                 quant_config=quant_config,
                 prefix=add_prefix(f"model.layers.{idx}.self_attn", prefix),
-                dual_chunk_attention_config=None,
-                alt_stream=alt_stream,
             )
             layer.mlp = Qwen3OmniMoeTalkerDenseMLP(
                 cp_config.hidden_size,
@@ -438,39 +567,32 @@ class Qwen3OmniMoeTalkerCodePredictor(nn.Module):
         self,
         inputs_embeds: torch.Tensor,
         positions: torch.Tensor,
-        forward_batch: ForwardBatch,
-    ):
-        """
-        Forward through the code predictor (matches vLLM-Omni's mtp_block pattern).
+    ) -> torch.Tensor:
+        """Forward through the code predictor.
 
         Args:
             inputs_embeds: [batch, seq_len, hidden_size]
-            positions: [total_tokens] position indices
-            forward_batch: SGLang's forward batch info
+            positions: [seq_len] position indices
 
         Returns:
-            hidden_states: [batch, seq_len, hidden_size] - final hidden states
+            hidden_states: [batch, seq_len, hidden_size]
         """
         hidden_states = inputs_embeds
 
         for layer in self.model.layers:
-            # Pre-norm self-attention with residual
             residual = hidden_states
             hidden_states = layer.input_layernorm(hidden_states)
             hidden_states = layer.self_attn(
-                positions=positions,
                 hidden_states=hidden_states,
-                forward_batch=forward_batch,
+                positions=positions,
             )
             hidden_states = residual + hidden_states
 
-            # Pre-norm MLP with residual
             residual = hidden_states
             hidden_states = layer.post_attention_layernorm(hidden_states)
             hidden_states = layer.mlp(hidden_states)
             hidden_states = residual + hidden_states
 
-        # Final norm
         hidden_states = self.model.norm(hidden_states)
         return hidden_states
 
@@ -629,13 +751,12 @@ class Qwen3OmniTalker(nn.Module):
 
             # Predict layers 1 to N-1 autoregressively
             for layer_idx in range(num_groups - 1):
-                # Forward through code predictor transformer
+                # Forward through code predictor transformer (no ForwardBatch needed)
                 predictor_hidden = self.code_predictor(
                     inputs_embeds=current_input,
                     positions=torch.arange(
                         current_input.shape[1], device=current_input.device
                     ),
-                    forward_batch=None,
                 )
 
                 # Predict from last token's hidden state (top_k=50, top_p=0.8 matching HF/vLLM-Omni)
@@ -644,7 +765,9 @@ class Qwen3OmniTalker(nn.Module):
                 )
                 probs = torch.softmax(logits[:, -1, :], dim=-1)
                 code = top_k_top_p_sampling_from_probs(
-                    probs, top_k=50, top_p=0.8
+                    probs,
+                    top_k=CODE_PREDICTOR_TOP_K,
+                    top_p=CODE_PREDICTOR_TOP_P,
                 )  # [batch, 1]
                 pos_codes.append(code)
 
@@ -678,7 +801,7 @@ class Qwen3OmniTalker(nn.Module):
             self._cached_params_dict = dict(self.named_parameters())
         params_dict = self._cached_params_dict
 
-        # Stacked parameters mapping
+        # Stacked parameters mapping (for talker backbone's QKVParallelLinear)
         stacked_params = [
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
@@ -695,14 +818,46 @@ class Qwen3OmniTalker(nn.Module):
             num_experts=self.config.text_config.num_experts,
         )
 
+        # Buffer for code predictor QKV concatenation
+        # HF stores q_proj/k_proj/v_proj separately; we concatenate into qkv_proj
+        cp_qkv_buffer: dict[str, dict[str, torch.Tensor]] = {}
+
         for name, loaded_weight in weights:
-            # Strip "talker." prefix if present
             if not name.startswith("talker."):
                 continue
             name = name[len("talker.") :]
 
-            # 1. Handle stacked parameters (qkv_proj, gate_up_proj)
-            handled = False
+            # Code predictor Q/K/V → concatenated qkv_proj
+            is_cp_qkv = (
+                "code_predictor.model.layers." in name
+                and ".self_attn." in name
+                and any(p in name for p in (".q_proj.", ".k_proj.", ".v_proj."))
+            )
+            if is_cp_qkv:
+                qkv_key = name.replace(".q_proj.", ".qkv_proj.")
+                qkv_key = qkv_key.replace(".k_proj.", ".qkv_proj.")
+                qkv_key = qkv_key.replace(".v_proj.", ".qkv_proj.")
+                buf = cp_qkv_buffer.setdefault(qkv_key, {})
+                if ".q_proj." in name:
+                    buf["q"] = loaded_weight
+                elif ".k_proj." in name:
+                    buf["k"] = loaded_weight
+                elif ".v_proj." in name:
+                    buf["v"] = loaded_weight
+                # When all three are collected, load the concatenated weight
+                if len(buf) == 3:
+                    param = params_dict.get(qkv_key)
+                    if param is not None:
+                        fused = torch.cat([buf["q"], buf["k"], buf["v"]], dim=0)
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, fused)
+                    del cp_qkv_buffer[qkv_key]
+                continue
+
+            # 1. Handle stacked parameters (backbone qkv_proj, gate_up_proj)
+            is_handled = False
             for param_name, weight_name, shard_id in stacked_params:
                 if weight_name in name and "mlp.experts" not in name:
                     param = params_dict.get(name.replace(weight_name, param_name))
@@ -711,9 +866,9 @@ class Qwen3OmniTalker(nn.Module):
                             param, "weight_loader", default_weight_loader
                         )
                         weight_loader(param, loaded_weight, shard_id)
-                        handled = True
+                        is_handled = True
                         break
-            if handled:
+            if is_handled:
                 continue
 
             # 2. Handle MoE expert parameters
@@ -732,9 +887,9 @@ class Qwen3OmniTalker(nn.Module):
                             shard_id=shard_id,
                             expert_id=expert_id,
                         )
-                        handled = True
+                        is_handled = True
                         break
-            if handled:
+            if is_handled:
                 continue
 
             # 3. Direct parameter loading

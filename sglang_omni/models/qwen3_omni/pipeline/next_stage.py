@@ -13,6 +13,8 @@ IMAGE_STAGE = "image_encoder"
 AUDIO_STAGE = "audio_encoder"
 AGGREGATE_STAGE = "mm_aggregate"
 THINKER_STAGE = "thinker"
+TALKER_STAGE = "talker_ar"
+CODE2WAV_STAGE = "code2wav"
 DECODE_STAGE = "decode"
 
 
@@ -40,7 +42,14 @@ def aggregate_next(request_id: str, output: Any) -> str:
     return THINKER_STAGE
 
 
-def thinker_next(request_id: str, output: Any) -> str:
+def thinker_next(request_id: str, output: Any) -> list[str]:
+    """Route thinker output to both talker (audio) and decode (text) in parallel."""
+    del request_id, output
+    return [TALKER_STAGE, DECODE_STAGE]
+
+
+def talker_next(request_id: str, output: Any) -> str:
+    """Route talker output to decode for final output assembly."""
     del request_id, output
     return DECODE_STAGE
 

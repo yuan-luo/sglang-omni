@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -27,6 +27,9 @@ from .runtime.encoder import (
     EncoderOutputProcessor,
 )
 from .scheduler import Scheduler
+
+if TYPE_CHECKING:
+    from sglang_omni.models.qwen3_omni.talker import Qwen3OmniTalker
 
 
 def create_encoder_engine(
@@ -173,6 +176,7 @@ def create_ar_engine(
 def create_sglang_ar_engine(
     server_args: Any,
     gpu_id: int = 0,
+    capture_hidden_layers: list[int] | None = None,
 ) -> OmniEngine:
     """Create an AR engine backed by SGLang's ModelWorker and KV cache.
 
@@ -258,7 +262,53 @@ def create_sglang_ar_engine(
         stream_adapter=_stream_adapter,
     )
     sglang_model_runner = SGLangModelRunner(
-        model_worker, output_proc, batch_planner=batch_planner
+        model_worker,
+        output_proc,
+        batch_planner=batch_planner,
+        capture_hidden_layers=capture_hidden_layers,
     )
 
     return OmniEngine(scheduler=scheduler, model_runner=sglang_model_runner)
+
+
+def create_sglang_talker_engine(
+    talker_model: "Qwen3OmniTalker",
+    model_worker: Any | None = None,
+    gpu_id: int = 0,
+) -> OmniEngine:
+    """Create a talker engine for codec generation.
+
+    The talker processes all thinker output positions in a single forward pass:
+    backbone forward -> layer-0 sampling -> code predictor for layers 1-15.
+
+    Args:
+        talker_model: Pre-loaded Qwen3OmniTalker model instance.
+        model_worker: Optional SGLang ModelWorker for ForwardBatch infrastructure.
+                      If None, the TalkerModelRunner uses direct forward mode.
+        gpu_id: GPU device ID.
+
+    Returns:
+        OmniEngine configured for talker codec generation.
+    """
+    from .runtime.sglang_talker import (
+        TalkerBatchPlanner,
+        TalkerIterationController,
+        TalkerModelRunner,
+        TalkerResourceManager,
+    )
+
+    device = torch.device(f"cuda:{gpu_id}")
+
+    scheduler = Scheduler(
+        batch_planner=TalkerBatchPlanner(),
+        resource_manager=TalkerResourceManager(),
+        iteration_controller=TalkerIterationController(),
+    )
+
+    talker_model_runner = TalkerModelRunner(
+        talker_model=talker_model,
+        model_worker=model_worker,
+        device=device,
+    )
+
+    return OmniEngine(scheduler=scheduler, model_runner=talker_model_runner)

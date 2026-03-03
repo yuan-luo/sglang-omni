@@ -8,10 +8,11 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from sglang_omni.engines.omni.runtime import ARRequestData, EncoderRequestData
-from sglang_omni.models.qwen3_omni.io import PipelineState, ThinkerOutput
+from sglang_omni.models.qwen3_omni.io import PipelineState, TalkerOutput, ThinkerOutput
 
 if TYPE_CHECKING:
     from sglang_omni.engines.omni.runtime.sglang_ar import SGLangARRequestData
+    from sglang_omni.engines.omni.runtime.sglang_talker import TalkerARRequestData
 
 
 def build_encoder_request(
@@ -193,3 +194,78 @@ def apply_thinker_result(
     state.thinker_out = thinker_out
     state.engine_outputs[stage_name] = thinker_out
     return thinker_out
+
+
+# ---------------------------------------------------------------------------
+# Talker helpers
+# ---------------------------------------------------------------------------
+
+
+def build_sglang_talker_request(
+    state: PipelineState,
+    *,
+    params: dict[str, Any],
+    request_id: str | None = None,
+) -> "TalkerARRequestData":
+    """Build TalkerARRequestData from pipeline state.
+
+    Extracts thinker hidden states from talker_inputs and wraps them
+    into a TalkerARRequestData for the talker engine.
+    """
+    from sglang_omni.engines.omni.runtime.sglang_talker import TalkerARRequestData
+
+    talker_inputs = state.talker_inputs
+    if not talker_inputs:
+        raise ValueError("talker_inputs missing on PipelineState")
+
+    thinker_embed = talker_inputs.get("thinker_embed")
+    thinker_hidden = talker_inputs.get("thinker_hidden")
+    is_multimodal_mask = talker_inputs.get("is_multimodal_mask")
+
+    if not isinstance(thinker_embed, torch.Tensor):
+        raise TypeError("talker_inputs.thinker_embed must be a torch.Tensor")
+    if not isinstance(thinker_hidden, torch.Tensor):
+        raise TypeError("talker_inputs.thinker_hidden must be a torch.Tensor")
+
+    max_new_tokens = params.get("talker_max_new_tokens", thinker_embed.shape[-2])
+
+    return TalkerARRequestData(
+        thinker_embed=thinker_embed,
+        thinker_hidden=thinker_hidden,
+        is_multimodal_mask=is_multimodal_mask,
+        max_new_tokens=max_new_tokens,
+        request_id=request_id or "talker-req-0",
+    )
+
+
+def apply_talker_result(
+    state: PipelineState,
+    *,
+    stage_name: str,
+    result: Any,
+) -> TalkerOutput:
+    """Store talker output (codec codes) on pipeline state."""
+    from sglang_omni.engines.omni.runtime.sglang_talker import TalkerARRequestData
+
+    if isinstance(result, TalkerARRequestData):
+        talker_out: TalkerOutput = {
+            "codec_codes": result.codec_codes,
+            "step": result.step,
+            "is_final": True,
+        }
+    elif isinstance(result, dict):
+        talker_out = {
+            "codec_codes": result.get("codec_codes", []),
+            "step": result.get("step", 0),
+            "is_final": True,
+        }
+    else:
+        talker_out = {
+            "codec_codes": [],
+            "step": 0,
+            "is_final": True,
+        }
+
+    state.talker_out = talker_out
+    state.engine_outputs[stage_name] = talker_out
+    return talker_out
