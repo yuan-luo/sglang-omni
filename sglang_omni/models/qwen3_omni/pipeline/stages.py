@@ -227,6 +227,15 @@ def create_sglang_thinker_executor(
         state = load_state(payload)
         apply_thinker_result(state, stage_name=THINKER_STAGE, result=result)
         step_counters.pop(payload.request_id, None)
+        # Populate talker_inputs from captured hidden states for downstream talker stage
+        extra = {}
+        if state.thinker_out and isinstance(state.thinker_out, dict):
+            extra = state.thinker_out.get("extra_model_outputs", {})
+        if extra:
+            state.talker_inputs = {
+                "thinker_embed": extra.get("thinker_embed"),
+                "thinker_hidden": extra.get("thinker_hidden"),
+            }
         return store_state(payload, state)
 
     def _stream_builder(payload: StagePayload | None, item: Any) -> Any:
@@ -268,9 +277,10 @@ def create_sglang_thinker_executor(
             "stage": THINKER_STAGE,
         }
 
-    # Capture thinker layer 0 (embedding) and layer 24 (accept_hidden_layer)
-    # for relay to the talker stage
-    capture_hidden_layers = [0, 24]
+    # Capture thinker embedding (layer -1) and layer 24 (accept_hidden_layer)
+    # for relay to the talker stage.  Layer -1 is a sentinel that hooks
+    # embed_tokens instead of a decoder layer.
+    capture_hidden_layers = [-1, 24]
 
     engine = create_sglang_ar_engine(
         server_args=server_args,
@@ -389,9 +399,10 @@ def create_sglang_talker_executor_from_config(
 ) -> EngineExecutor:
     """Create a talker executor from JSON-serializable config args.
 
-    Loads the Qwen3OmniTalker model and optionally creates a SGLang
-    ModelWorker for ForwardBatch infrastructure.
+    Loads the Qwen3OmniTalker model and patches RadixAttention with SDPA
+    so it can run without a full SGLang ModelWorker.
     """
+    from sglang_omni.engines.omni.runtime.sglang_talker import patch_talker_attention
     from sglang_omni.models.qwen3_omni.talker import Qwen3OmniTalker
 
     talker_config = _load_talker_config(model_path)
@@ -399,7 +410,10 @@ def create_sglang_talker_executor_from_config(
 
     checkpoint_weights = _load_checkpoint_weights(model_path)
     talker_model.load_weights(checkpoint_weights)
-    talker_model = talker_model.to(f"cuda:{gpu_id}").eval()
+    talker_model = talker_model.to(device=f"cuda:{gpu_id}", dtype=torch.bfloat16).eval()
+
+    # Patch RadixAttention → SDPA so the backbone works without ModelWorker
+    patch_talker_attention(talker_model)
 
     return create_sglang_talker_executor(
         talker_model=talker_model,
@@ -415,6 +429,15 @@ def _load_talker_config(model_path: str) -> Any:
 
     from sglang_omni.config.qwen3_omni import Qwen3OmniMoeTalkerConfig
 
+    # Resolve HuggingFace model IDs to local snapshot paths
+    if not os.path.isdir(model_path):
+        try:
+            from huggingface_hub import snapshot_download
+
+            model_path = snapshot_download(model_path, local_files_only=True)
+        except Exception:
+            pass
+
     config_path = os.path.join(model_path, "config.json")
     if not os.path.exists(config_path):
         return Qwen3OmniMoeTalkerConfig()
@@ -422,24 +445,57 @@ def _load_talker_config(model_path: str) -> Any:
     with open(config_path) as f:
         raw_config = json.load(f)
 
-    talker_cfg = raw_config.get("talker", {})
+    talker_cfg = raw_config.get("talker_config", {})
     return Qwen3OmniMoeTalkerConfig(**talker_cfg)
 
 
-def _load_checkpoint_weights(model_path: str) -> list[tuple[str, torch.Tensor]]:
-    """Load checkpoint weights from safetensors or pytorch files."""
-    import glob
+def _load_checkpoint_weights(
+    model_path: str,
+    prefix: str = "talker.",
+) -> list[tuple[str, torch.Tensor]]:
+    """Load checkpoint weights that match *prefix* from safetensors files.
+
+    Uses ``model.safetensors.index.json`` (if present) to load only the
+    shard files that actually contain matching keys, avoiding the need to
+    read every shard (~70 GB for the full model).
+    """
+    import json
     import os
 
     from safetensors.torch import load_file
 
-    weights: list[tuple[str, torch.Tensor]] = []
-    safetensor_files = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
+    # Resolve HuggingFace model IDs to local snapshot paths
+    if not os.path.isdir(model_path):
+        try:
+            from huggingface_hub import snapshot_download
 
-    for sf_path in safetensor_files:
+            model_path = snapshot_download(model_path, local_files_only=True)
+        except Exception:
+            pass
+
+    index_path = os.path.join(model_path, "model.safetensors.index.json")
+
+    if os.path.exists(index_path):
+        with open(index_path) as f:
+            index = json.load(f)
+        weight_map: dict[str, str] = index.get("weight_map", {})
+        # Collect only the shard files that contain keys starting with prefix
+        needed_files: set[str] = set()
+        for key, shard_file in weight_map.items():
+            if key.startswith(prefix):
+                needed_files.add(shard_file)
+        shard_paths = sorted(os.path.join(model_path, f) for f in needed_files)
+    else:
+        import glob
+
+        shard_paths = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
+
+    weights: list[tuple[str, torch.Tensor]] = []
+    for sf_path in shard_paths:
         state_dict = load_file(sf_path)
         for name, tensor in state_dict.items():
-            weights.append((name, tensor))
+            if name.startswith(prefix):
+                weights.append((name, tensor))
 
     return weights
 

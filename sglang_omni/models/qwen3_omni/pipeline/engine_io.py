@@ -248,9 +248,12 @@ def apply_talker_result(
     from sglang_omni.engines.omni.runtime.sglang_talker import TalkerARRequestData
 
     if isinstance(result, TalkerARRequestData):
+        codec_codes = result.codec_codes
+        if hasattr(codec_codes, "tolist"):
+            codec_codes = codec_codes.tolist()
         talker_out: TalkerOutput = {
-            "codec_codes": result.codec_codes,
-            "step": result.step,
+            "codec_codes": codec_codes,
+            "step": 1,
             "is_final": True,
         }
     elif isinstance(result, dict):

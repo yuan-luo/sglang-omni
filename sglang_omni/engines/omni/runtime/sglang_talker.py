@@ -23,12 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from ..types import (
-    ModelRunnerOutput,
-    RequestOutput,
-    SchedulerOutput,
-    SchedulerRequest,
-)
+from ..types import ModelRunnerOutput, RequestOutput, SchedulerOutput, SchedulerRequest
 from .interfaces import ResourceManager
 
 if TYPE_CHECKING:
@@ -197,9 +192,7 @@ class TalkerIterationController:
     request is finished after a single iteration.
     """
 
-    def update_request(
-        self, request: SchedulerRequest, output: RequestOutput
-    ) -> None:
+    def update_request(self, request: SchedulerRequest, output: RequestOutput) -> None:
         """Store generated codec codes and embeddings on the request data."""
         talker_data: TalkerARRequestData = request.data
         if not isinstance(output.data, dict):
@@ -215,9 +208,7 @@ class TalkerIterationController:
 
         talker_data.is_finished = True
 
-    def is_finished(
-        self, request: SchedulerRequest, output: RequestOutput
-    ) -> bool:
+    def is_finished(self, request: SchedulerRequest, output: RequestOutput) -> bool:
         return True
 
 
@@ -317,9 +308,7 @@ class TalkerModelRunner:
             "summed_codec_embeds": summed_embeds.squeeze(0),
         }
 
-    def _prepare_input_embeds(
-        self, request_data: TalkerARRequestData
-    ) -> torch.Tensor:
+    def _prepare_input_embeds(self, request_data: TalkerARRequestData) -> torch.Tensor:
         """Project thinker outputs to talker hidden dimension.
 
         Adds batch dimension [1, seq_len, hidden] for single-request
@@ -347,9 +336,7 @@ class TalkerModelRunner:
 
         return input_embeds
 
-    def _run_backbone_forward(
-        self, input_embeds: torch.Tensor
-    ) -> torch.Tensor:
+    def _run_backbone_forward(self, input_embeds: torch.Tensor) -> torch.Tensor:
         """Run the talker MoE backbone on the full input sequence.
 
         Uses the model worker's ForwardBatch infrastructure when available.
@@ -412,9 +399,7 @@ class TalkerModelRunner:
 
         try:
             hidden_states = self.talker_model.forward(
-                input_ids=torch.zeros(
-                    seq_len, dtype=torch.long, device=self.device
-                ),
+                input_ids=torch.zeros(seq_len, dtype=torch.long, device=self.device),
                 positions=positions,
                 forward_batch=forward_batch,
                 inputs_embeds=flat_embeds,
@@ -456,9 +441,7 @@ class TalkerModelRunner:
 
         return hidden_states.unsqueeze(0)
 
-    def _sample_layer0_codes(
-        self, talker_hidden: torch.Tensor
-    ) -> torch.Tensor:
+    def _sample_layer0_codes(self, talker_hidden: torch.Tensor) -> torch.Tensor:
         """Compute layer-0 codec logits and sample codes via argmax.
 
         Args:
@@ -508,22 +491,172 @@ def _empty_model_runner_output() -> ModelRunnerOutput:
     )
 
 
-class _MockForwardBatch:
-    """Minimal ForwardBatch substitute for testing.
+class _ExtendForwardMode:
+    """Stub forward mode that reports extend (prefill) mode."""
 
-    Only suitable for unit tests where attention is patched or the model
-    uses standard SDPA fallback.
+    def is_extend(self) -> bool:
+        return True
+
+    def is_decode(self) -> bool:
+        return False
+
+    def is_idle(self) -> bool:
+        return False
+
+
+class _MockForwardBatch:
+    """Minimal ForwardBatch substitute for the talker backbone.
+
+    Used when attention is patched to SDPA (no paged KV cache needed).
+    Provides enough interface for the decoder layer's ``forward_prepare``
+    and ``LayerCommunicator`` to proceed without crashing.
     """
+
+    # Optional ForwardBatch attributes that SGLang internals probe.
+    # Returning None disables the corresponding feature gates (NSA, fused
+    # KV buffer, context parallelism, etc.).
+    _OPTIONAL_NONE_ATTRS: frozenset[str] = frozenset(
+        {
+            "token_to_kv_pool",
+            "nsa_cp_metadata",
+            "extend_prefix_lens",
+            "extend_seq_lens",
+            "extend_logprob_start_lens",
+            "top_logprobs_nums",
+            "return_logprob",
+            "positions",
+            "mrope_positions",
+            "spec_info",
+            "capture_hidden_mode",
+        }
+    )
 
     def __init__(self, seq_len: int, device: torch.device) -> None:
         self.seq_lens = torch.tensor([seq_len], device=device)
         self.req_pool_indices = torch.zeros(1, dtype=torch.long, device=device)
         self.seq_lens_sum = seq_len
         self.out_cache_loc = torch.arange(seq_len, device=device)
-        self.forward_mode = None
+        self.forward_mode = _ExtendForwardMode()
         self.total_num_tokens = seq_len
+        self.input_ids = torch.zeros(seq_len, dtype=torch.long, device=device)
+        # Attributes accessed by LayerCommunicator / MoE / attention internals
+        self.batch_size = 1
+        self.is_extend_in_batch = True
+        self.global_num_tokens_cpu = None
+        self.num_token_non_padded = None
+        self.can_run_dp_cuda_graph = False
+
+    def __getattr__(self, name: str) -> None:
+        """Return None for known optional ForwardBatch attributes.
+
+        SGLang internals probe many attributes for optional feature gates.
+        Unknown attributes raise AttributeError to preserve normal Python
+        semantics (so ``hasattr`` works correctly for truly missing attrs).
+        """
+        if name in _MockForwardBatch._OPTIONAL_NONE_ATTRS:
+            return None
+        raise AttributeError(f"'_MockForwardBatch' object has no attribute '{name}'")
 
 
 def _build_mock_forward_batch(seq_len: int, device: torch.device) -> _MockForwardBatch:
-    """Build a minimal mock ForwardBatch for testing without model worker."""
+    """Build a minimal mock ForwardBatch for the talker backbone."""
     return _MockForwardBatch(seq_len, device)
+
+
+# ---------------------------------------------------------------------------
+# SDPA attention patch (replaces RadixAttention in talker backbone)
+# ---------------------------------------------------------------------------
+
+
+class _SDPAWrapper(torch.nn.Module):
+    """Drop-in replacement for RadixAttention using standard scaled dot-product attention.
+
+    RadixAttention requires paged KV cache infrastructure (ForwardBatch with
+    memory pools, attention backend, etc.).  For the talker backbone which
+    does a single full-sequence forward pass, standard SDPA with a causal
+    mask is sufficient and avoids the need for a full SGLang ModelWorker.
+
+    The wrapper accepts the same ``(q, k, v, forward_batch)`` signature as
+    RadixAttention and ignores ``forward_batch``.
+    """
+
+    def __init__(self, num_heads: int, num_kv_heads: int, head_dim: int) -> None:
+        super().__init__()
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.num_kv_groups = num_heads // num_kv_heads
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        forward_batch: Any,
+        save_kv_cache: bool = True,
+    ) -> torch.Tensor:
+        """Run SDPA attention.
+
+        Args:
+            q: [total_tokens, num_heads * head_dim]
+            k: [total_tokens, num_kv_heads * head_dim]
+            v: [total_tokens, num_kv_heads * head_dim]
+            forward_batch: Ignored.
+            save_kv_cache: Ignored.
+
+        Returns:
+            output: [total_tokens, num_heads * head_dim]
+        """
+        seq_len = q.shape[0]
+        q = q.view(seq_len, self.num_heads, self.head_dim).unsqueeze(0).transpose(1, 2)
+        k = (
+            k.view(seq_len, self.num_kv_heads, self.head_dim)
+            .unsqueeze(0)
+            .transpose(1, 2)
+        )
+        v = (
+            v.view(seq_len, self.num_kv_heads, self.head_dim)
+            .unsqueeze(0)
+            .transpose(1, 2)
+        )
+
+        # GQA: expand K/V to match Q head count
+        if self.num_kv_groups > 1:
+            k = k.repeat_interleave(self.num_kv_groups, dim=1)
+            v = v.repeat_interleave(self.num_kv_groups, dim=1)
+
+        # [1, heads, seq, dim]
+        out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+        # [seq, heads * dim]
+        return out.transpose(1, 2).squeeze(0).reshape(seq_len, -1)
+
+
+def patch_talker_attention(talker_model: "Qwen3OmniTalker") -> None:
+    """Replace RadixAttention modules in the talker backbone with SDPA wrappers.
+
+    This allows the talker backbone to run without paged KV cache / ModelWorker.
+    Only patches the backbone (``talker_model.model``); the code predictor
+    already uses standard attention.
+
+    Also fixes RotaryEmbedding cos_sin_cache dtype: the CUDA RoPE kernel
+    requires float32, but `model.to(bfloat16)` converts buffers too.
+    """
+    text_model = talker_model.model  # Qwen3OmniMoeTalkerTextModel
+    for layer in text_model.layers:
+        attn_mod = layer.self_attn
+        sdpa = _SDPAWrapper(
+            num_heads=attn_mod.num_heads,
+            num_kv_heads=attn_mod.num_kv_heads,
+            head_dim=attn_mod.head_dim,
+        )
+        attn_mod.attn = sdpa
+        # Fix RoPE cos_sin_cache dtype: CUDA kernel requires float32
+        rotary = getattr(attn_mod, "rotary_emb", None)
+        if rotary is not None:
+            cache = getattr(rotary, "cos_sin_cache", None)
+            if cache is not None and cache.dtype != torch.float32:
+                rotary.cos_sin_cache = cache.to(torch.float32)
+        logger.info(
+            "Patched talker layer %d attention: RadixAttention → SDPA",
+            layer.layer_id,
+        )

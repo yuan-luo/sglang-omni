@@ -342,7 +342,7 @@ class SGLangIterationController:
     """
 
     HIDDEN_LAYER_KEY_MAP: dict[int, str] = {
-        0: "thinker_embed",
+        -1: "thinker_embed",
         24: "thinker_hidden",
     }
 
@@ -416,7 +416,8 @@ class HiddenStateCaptureHook:
         Args:
             model: The thinker text model (Qwen3OmniMoeThinkerTextModel)
                    Expected to have model.layers attribute.
-            layer_indices: Layer indices to capture (e.g., [0, 24]).
+            layer_indices: Layer indices to capture.
+                           Use -1 as sentinel for the embedding layer (embed_tokens).
         """
         layers = _get_model_layers(model)
         if layers is None:
@@ -424,6 +425,15 @@ class HiddenStateCaptureHook:
             return
 
         for idx in layer_indices:
+            if idx == -1:
+                # Hook the embedding layer output instead of a decoder layer
+                embed_module = _get_embed_tokens(model)
+                if embed_module is not None:
+                    handle = embed_module.register_forward_hook(self._make_hook(idx))
+                    self._handles.append(handle)
+                else:
+                    logger.warning("Cannot find embed_tokens for embedding capture")
+                continue
             if idx >= len(layers):
                 logger.warning(
                     "Layer index %d out of range (model has %d layers)",
@@ -458,20 +468,45 @@ class HiddenStateCaptureHook:
         self._handles.clear()
 
 
-def _get_model_layers(model: Any) -> Any | None:
-    """Navigate model wrapper to find the decoder layers list."""
-    # SGLang ModelRunner wraps model in model_runner.model
+def _get_inner_text_model(model: Any) -> Any | None:
+    """Navigate model wrappers to find the inner text model with layers + embed_tokens.
+
+    Handles various nesting patterns:
+      - model.layers                       (direct)
+      - model.model.layers                 (e.g., LlamaForCausalLM)
+      - model.model.model.layers           (deeper wrappers)
+      - model.thinker.model.layers         (Qwen3OmniMoeForConditionalGeneration)
+    """
     candidates = [
         model,
         getattr(model, "model", None),
         getattr(getattr(model, "model", None), "model", None),
+        # Qwen3-Omni: model.thinker.model has layers + embed_tokens
+        getattr(getattr(model, "thinker", None), "model", None),
     ]
     for candidate in candidates:
         if candidate is None:
             continue
-        layers = getattr(candidate, "layers", None)
+        if getattr(candidate, "layers", None) is not None:
+            return candidate
+    return None
+
+
+def _get_model_layers(model: Any) -> Any | None:
+    """Navigate model wrapper to find the decoder layers list."""
+    inner = _get_inner_text_model(model)
+    if inner is not None:
+        layers = getattr(inner, "layers", None)
         if layers is not None and hasattr(layers, "__len__"):
             return layers
+    return None
+
+
+def _get_embed_tokens(model: Any) -> Any | None:
+    """Navigate model wrapper to find the embed_tokens module."""
+    inner = _get_inner_text_model(model)
+    if inner is not None:
+        return getattr(inner, "embed_tokens", None)
     return None
 
 

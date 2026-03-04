@@ -383,9 +383,52 @@ def _apply_rotary_emb(
     half = x.shape[-1] // 2
     x1 = x[..., :half]
     x2 = x[..., half:]
-    cos = cos.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, head_dim/2]
-    sin = sin.unsqueeze(0).unsqueeze(0)
+    cos = cos.unsqueeze(0).unsqueeze(0).to(x.dtype)  # [1, 1, seq_len, head_dim/2]
+    sin = sin.unsqueeze(0).unsqueeze(0).to(x.dtype)
     return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
+
+
+class _CodePredictorMLP(nn.Module):
+    """SwiGLU MLP for the code predictor (matches HF checkpoint structure).
+
+    Checkpoint weight names: gate_proj, up_proj, down_proj.
+    Forward: down_proj(silu(gate_proj(x)) * up_proj(x))
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_proj = ReplicatedLinear(
+            hidden_size,
+            intermediate_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=add_prefix("gate_proj", prefix),
+        )
+        self.up_proj = ReplicatedLinear(
+            hidden_size,
+            intermediate_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=add_prefix("up_proj", prefix),
+        )
+        self.down_proj = ReplicatedLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=add_prefix("down_proj", prefix),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate, _ = self.gate_proj(x)
+        up, _ = self.up_proj(x)
+        return self.down_proj(torch.nn.functional.silu(gate) * up)[0]
 
 
 class _CausalSelfAttention(nn.Module):
@@ -533,9 +576,9 @@ class Qwen3OmniMoeTalkerCodePredictor(nn.Module):
                 quant_config=quant_config,
                 prefix=add_prefix(f"model.layers.{idx}.self_attn", prefix),
             )
-            layer.mlp = Qwen3OmniMoeTalkerDenseMLP(
-                cp_config.hidden_size,
-                cp_config.intermediate_size,
+            layer.mlp = _CodePredictorMLP(
+                hidden_size=cp_config.hidden_size,
+                intermediate_size=cp_config.intermediate_size,
                 quant_config=quant_config,
                 prefix=add_prefix(f"model.layers.{idx}.mlp", prefix),
             )
@@ -571,21 +614,33 @@ class Qwen3OmniMoeTalkerCodePredictor(nn.Module):
         """Forward through the code predictor.
 
         Args:
-            inputs_embeds: [batch, seq_len, hidden_size]
+            inputs_embeds: [batch, seq_len, hidden_size] or [seq_len, hidden_size]
             positions: [seq_len] position indices
 
         Returns:
-            hidden_states: [batch, seq_len, hidden_size]
+            hidden_states: same shape as inputs_embeds
         """
-        hidden_states = inputs_embeds
+        # SGLang's CUDA RMSNorm expects 2D [tokens, hidden].
+        # Flatten batch dim if present, unflatten at the end.
+        has_batch_dim = inputs_embeds.dim() == 3
+        if has_batch_dim:
+            batch_size, seq_len, hidden_size = inputs_embeds.shape
+            hidden_states = inputs_embeds.reshape(-1, hidden_size)
+        else:
+            hidden_states = inputs_embeds
 
         for layer in self.model.layers:
             residual = hidden_states
             hidden_states = layer.input_layernorm(hidden_states)
+            # self_attn expects 3D for causal mask; reshape temporarily
+            if has_batch_dim:
+                hidden_states = hidden_states.view(batch_size, seq_len, -1)
             hidden_states = layer.self_attn(
                 hidden_states=hidden_states,
                 positions=positions,
             )
+            if has_batch_dim:
+                hidden_states = hidden_states.reshape(-1, hidden_size)
             hidden_states = residual + hidden_states
 
             residual = hidden_states
@@ -594,6 +649,9 @@ class Qwen3OmniMoeTalkerCodePredictor(nn.Module):
             hidden_states = residual + hidden_states
 
         hidden_states = self.model.norm(hidden_states)
+
+        if has_batch_dim:
+            hidden_states = hidden_states.view(batch_size, seq_len, hidden_size)
         return hidden_states
 
 
@@ -765,10 +823,14 @@ class Qwen3OmniTalker(nn.Module):
                 )
                 probs = torch.softmax(logits[:, -1, :], dim=-1)
                 code = top_k_top_p_sampling_from_probs(
-                    probs,
+                    probs.float(),
                     top_k=CODE_PREDICTOR_TOP_K,
                     top_p=CODE_PREDICTOR_TOP_P,
-                )  # [batch, 1]
+                )  # [batch] int32
+                # Ensure [batch, 1] for embedding lookup and code accumulation
+                if code.dim() == 1:
+                    code = code.unsqueeze(1)
+                code = code.long()
                 pos_codes.append(code)
 
                 # Append new embedding to growing sequence

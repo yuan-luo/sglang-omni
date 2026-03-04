@@ -42,10 +42,10 @@ def aggregate_next(request_id: str, output: Any) -> str:
     return THINKER_STAGE
 
 
-def thinker_next(request_id: str, output: Any) -> list[str]:
-    """Route thinker output to both talker (audio) and decode (text) in parallel."""
+def thinker_next(request_id: str, output: Any) -> str:
+    """Route thinker output to talker, then talker routes to decode."""
     del request_id, output
-    return [TALKER_STAGE, DECODE_STAGE]
+    return TALKER_STAGE
 
 
 def talker_next(request_id: str, output: Any) -> str:
