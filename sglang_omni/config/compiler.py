@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +44,9 @@ def compile_pipeline(config: PipelineConfig) -> tuple[Coordinator, list[Stage]]:
 
     stages: list[Stage] = []
     for stage_cfg in stages_cfg:
-        stage = _compile_stage(stage_cfg, stage_endpoints, endpoints, name_map=name_map)
+        stage = _compile_stage(
+            stage_cfg, config, stage_endpoints, endpoints, name_map=name_map
+        )
         coordinator.register_stage(stage.name, stage.control_plane.recv_endpoint)
         stages.append(stage)
 
@@ -52,6 +55,7 @@ def compile_pipeline(config: PipelineConfig) -> tuple[Coordinator, list[Stage]]:
 
 def _compile_stage(
     stage_cfg: StageConfig,
+    global_cfg: PipelineConfig,
     stage_endpoints: dict[str, str],
     endpoints: dict[str, str],
     *,
@@ -78,8 +82,16 @@ def _compile_stage(
         abort_endpoint=endpoints["abort"],
         endpoints=stage_endpoints,
         input_handler=input_handler,
-        relay_config=_build_relay_config(stage_cfg),
+        relay_config=_build_relay_config(stage_cfg, global_cfg),
     )
+
+    # check if factory has the signature of model_path and the user does not provide the model path
+    # if yes, use the one in global config
+    if (
+        "model_path" in inspect.signature(factory).parameters
+        and "model_path" not in stage_cfg.executor.args
+    ):
+        stage_cfg.executor.args["model_path"] = global_cfg.model_path
 
     for _ in range(stage_cfg.num_workers):
         executor = factory(**stage_cfg.executor.args)
@@ -113,10 +125,12 @@ def _create_input_handler(
     return AggregatedInput(sources=set(sources), merge=merge_fn)
 
 
-def _build_relay_config(stage_cfg: StageConfig) -> dict[str, Any]:
+def _build_relay_config(
+    stage_cfg: StageConfig, global_cfg: PipelineConfig
+) -> dict[str, Any]:
     relay_cfg = stage_cfg.relay
     return {
-        "relay_type": relay_cfg.type,
+        "relay_type": global_cfg.relay_backend,
         "slot_size_mb": relay_cfg.slot_size_mb,
         "credits": relay_cfg.credits,
         "rank": relay_cfg.rank,

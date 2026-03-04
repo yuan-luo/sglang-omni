@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from sglang_omni.config import (
     ExecutorConfig,
@@ -77,11 +77,9 @@ class Qwen3OmniPipelineConfig(PipelineConfig):
         StageConfig(
             name=THINKER_STAGE,
             executor=ExecutorConfig(
-                factory="sglang_omni.models.qwen3_omni.pipeline.stages.create_thinker_executor",
+                factory="sglang_omni.models.qwen3_omni.pipeline.stages.create_sglang_thinker_executor_from_config",
                 args={
-                    "device": "cuda",
-                    "dtype": None,
-                    "max_seq_len": 8192,
+                    "thinker_max_seq_len": 8192,
                 },
             ),
             get_next="sglang_omni.models.qwen3_omni.pipeline.next_stage.thinker_next",
@@ -97,14 +95,6 @@ class Qwen3OmniPipelineConfig(PipelineConfig):
             relay=RelayConfig(device="cpu"),
         ),
     ]
-
-    def model_post_init(self, __context: Any = None) -> None:
-        super().model_post_init(__context)
-
-        # TODO: we need to refactor this factory pattern to avoid
-        for stage in self.stages:
-            if stage.name != AGGREGATE_STAGE:
-                stage.executor.args["model_id"] = self.model_path
 
 
 EntryClass = Qwen3OmniPipelineConfig
