@@ -254,12 +254,28 @@ def create_sglang_thinker_executor(
             events = [
                 OmniEvent(type="text_final", modality="text", payload={}, is_final=True)
             ]
-        return {
+
+        text_to_add = ""
+        for event in events:
+            if event.modality == "text" and "text" in event.payload:
+                if event.is_final:
+                    # If a final text event is found, it contains the complete text for this step.
+                    # This should override any accumulated delta.
+                    text_to_add = event.payload["text"]
+                    break  # No need to process further events for text accumulation
+                else:
+                    # Accumulate text from non-final delta events
+                    text_to_add += event.payload["text"]
+
+        result: dict[str, Any] = {
             "events": [_event_to_dict(event) for event in events],
             "token_id": token_id,
             "step": step,
             "stage": THINKER_STAGE,
         }
+        if text_to_add:
+            result["text"] = text_to_add
+        return result
 
     engine = create_sglang_ar_engine(
         server_args=server_args,
