@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 
@@ -28,11 +28,6 @@ from .runtime.encoder import (
     EncoderOutputProcessor,
 )
 from .scheduler import Scheduler
-from .types import ModelRunnerOutput, RequestOutput, SchedulerOutput, SchedulerRequest
-
-if TYPE_CHECKING:
-    from sglang_omni.models.qwen3_omni.pipeline.engine_io import TalkerRequestData
-    from sglang_omni.models.qwen3_omni.talker import Qwen3OmniTalker
 
 logger = logging.getLogger(__name__)
 
@@ -280,250 +275,101 @@ def create_sglang_ar_engine(
     return OmniEngine(scheduler=scheduler, model_runner=sglang_model_runner)
 
 
-def create_talker_codec_engine(
-    talker_model: "Qwen3OmniTalker",
+def create_sglang_talker_ar_engine(
+    server_args: Any,
     gpu_id: int = 0,
 ) -> OmniEngine:
-    """Create a talker engine for single-pass codec generation."""
-    device = torch.device(f"cuda:{gpu_id}")
+    """Create a Talker AR engine backed by SGLang's ModelWorker and KV cache.
 
-    scheduler = Scheduler(
-        batch_planner=_SingleRequestBatchPlanner(),
-        resource_manager=SimpleResourceManager(max_count=1),
-        iteration_controller=SinglePassIterationController(),
+    The Talker runs as an autoregressive decoder with:
+    - KV cache and continuous batching via SGLang
+    - Code Predictor per-step hook for residual code generation
+    - Prefill embedding injection for thinker-to-talker context
+
+    Args:
+        server_args: SGLang ServerArgs configuration (model_path should point
+            to the full Qwen3-Omni checkpoint).
+        gpu_id: GPU device ID
+
+    Returns:
+        OmniEngine configured for the Talker stage
+    """
+    from sglang_omni.engines.ar.sglang_backend.model_worker import (
+        ModelWorkerConfig,
+        TalkerModelWorker,
+    )
+    from sglang_omni.engines.ar.sglang_backend.scheduler.cache import create_tree_cache
+    from sglang_omni.engines.ar.sglang_backend.scheduler.decode import DecodeManager
+    from sglang_omni.engines.ar.sglang_backend.scheduler.prefill import PrefillManager
+
+    from .runtime.sglang_ar import (
+        SGLangBatchPlanner,
+        SGLangIterationController,
+        SGLangOutputProcessor,
+        SGLangResourceManager,
+        TalkerSGLangModelRunner,
     )
 
-    codec_runner = TalkerCodecRunner(talker_model=talker_model, device=device)
+    # Initialize Talker model worker (patches config for Talker dimensions)
+    model_worker = TalkerModelWorker(
+        config=ModelWorkerConfig(),
+        server_args=server_args,
+        gpu_id=gpu_id,
+    )
 
-    return OmniEngine(scheduler=scheduler, model_runner=codec_runner)
+    # Get memory pools
+    req_to_token_pool, token_to_kv_pool_allocator = model_worker.get_memory_pool()
 
+    # Create tree cache
+    tree_cache = create_tree_cache(
+        server_args,
+        req_to_token_pool,
+        token_to_kv_pool_allocator,
+        server_args.page_size,
+    )
 
-class TalkerCodecRunner:
-    """Model runner that generates multi-layer RVQ codec codes.
+    # Create prefill and decode managers
+    prefill_mgr = PrefillManager(
+        page_size=server_args.page_size,
+        chunked_prefill_size=server_args.chunked_prefill_size,
+        max_prefill_tokens=server_args.max_prefill_tokens,
+        req_to_token_pool=req_to_token_pool,
+        token_to_kv_pool_allocator=token_to_kv_pool_allocator,
+        tree_cache=tree_cache,
+        model_config=model_worker.model_config,
+        enable_overlap=False,
+    )
+    decode_mgr = DecodeManager(
+        server_args=server_args,
+        token_to_kv_pool_allocator=token_to_kv_pool_allocator,
+        on_retract=lambda req: prefill_mgr.add_one_request(req),
+    )
 
-    Pipeline:
-      1. Project thinker outputs to talker hidden dim
-      2. Forward through talker backbone (single pass)
-      3. Layer-0 codes via argmax on logits
-      4. Layers 1-15 via code predictor
+    # Assemble components
+    batch_planner = SGLangBatchPlanner(prefill_mgr, decode_mgr, server_args)
+    resource_mgr = SGLangResourceManager(
+        token_to_kv_pool_allocator, req_to_token_pool, tree_cache
+    )
+    iteration_ctrl = SGLangIterationController(tree_cache)
+    output_proc = SGLangOutputProcessor()
 
-    Note (chenyang): TalkerCodecRunner does not use SGLang ModelWorker,
-    since talker runs a single full-sequence forward, no KV cache needed,
-    variable input sequence lengths hurts CUDA graph, and so on.
-    """
+    def _stream_adapter(request, output):
+        if request.data.req.is_chunked > 0:
+            return None
+        token = output.data
+        return int(token) if token is not None else None
 
-    def __init__(
-        self,
-        talker_model: "Qwen3OmniTalker",
-        device: torch.device,
-    ) -> None:
-        self.talker_model = talker_model
-        self.device = device
+    scheduler = Scheduler(
+        batch_planner=batch_planner,
+        resource_manager=resource_mgr,
+        iteration_controller=iteration_ctrl,
+        stream_adapter=_stream_adapter,
+    )
 
-    @torch.inference_mode()
-    def execute(self, scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
-        if not scheduler_output.requests:
-            return ModelRunnerOutput(outputs={}, req_ids=[], req_id_to_index={})
+    talker_model_runner = TalkerSGLangModelRunner(
+        model_worker,
+        output_proc,
+        batch_planner=batch_planner,
+    )
 
-        request = scheduler_output.requests[0]
-        codec_output = self._generate_codec(request.data)
-
-        outputs = {
-            request.request_id: RequestOutput(
-                request_id=request.request_id,
-                data=codec_output,
-                finished=True,
-                finish_reason="stop",
-            ),
-        }
-        return ModelRunnerOutput(
-            outputs=outputs,
-            req_ids=[request.request_id],
-            req_id_to_index={request.request_id: 0},
-        )
-
-    def _generate_codec(
-        self, request_data: "TalkerRequestData"
-    ) -> dict[str, torch.Tensor]:
-        """Run full codec generation pipeline for one request."""
-        input_embeds = self._prepare_embeds(request_data)
-        hidden_states = self._run_backbone(input_embeds)
-
-        # Layer-0 codes: codec_head logits → argmax
-        logits = self.talker_model.compute_logits(hidden_states.squeeze(0))
-        layer0_codes = logits.argmax(dim=-1).unsqueeze(0)
-
-        # Layers 1-15 via code predictor
-        codec_codes, summed_embeds = self.talker_model.code_predictor_forward(
-            layer0_codes=layer0_codes,
-            talker_hidden=hidden_states,
-        )
-
-        return {
-            "codec_codes": codec_codes.squeeze(0),
-            "summed_codec_embeds": summed_embeds.squeeze(0),
-        }
-
-    def _prepare_embeds(self, request_data: "TalkerRequestData") -> torch.Tensor:
-        """Project thinker outputs to talker hidden dim. Returns [1, seq, hidden]."""
-        is_multimodal_mask = None
-        if request_data.is_multimodal_mask is not None:
-            is_multimodal_mask = request_data.is_multimodal_mask.to(self.device)
-
-        input_embeds = self.talker_model.prepare_input_embeds(
-            thinker_embeds=request_data.thinker_embed.to(self.device),
-            thinker_hidden_states=request_data.thinker_hidden.to(self.device),
-            is_multimodal_mask=is_multimodal_mask,
-        )
-        if input_embeds.dim() == 2:
-            input_embeds = input_embeds.unsqueeze(0)
-        return input_embeds
-
-    def _run_backbone(self, input_embeds: torch.Tensor) -> torch.Tensor:
-        """Run talker backbone forward."""
-        seq_len = input_embeds.shape[1]
-        flat_embeds = input_embeds.squeeze(0)
-        positions = torch.arange(seq_len, device=self.device)
-        forward_batch = _MockForwardBatch(seq_len, self.device)
-
-        hidden_states = self.talker_model.forward(
-            input_ids=torch.zeros(seq_len, dtype=torch.long, device=self.device),
-            positions=positions,
-            forward_batch=forward_batch,
-            inputs_embeds=flat_embeds,
-        )
-        return hidden_states.unsqueeze(0)
-
-
-class _SingleRequestBatchPlanner:
-    """Selects one request per step."""
-
-    def select_requests(
-        self,
-        waiting: list[SchedulerRequest],
-        running: list[SchedulerRequest],
-        resource_manager: Any,
-    ) -> list[SchedulerRequest]:
-        if running:
-            return [running[0]]
-        if not waiting:
-            return []
-        request = waiting[0]
-        if not resource_manager.can_allocate(request):
-            return []
-        resource_manager.allocate(request)
-        return [request]
-
-    def build_batch(self, requests: list[SchedulerRequest]) -> None:
-        return None
-
-
-class _SDPAWrapper(torch.nn.Module):
-    """Drop-in replacement for RadixAttention using scaled dot-product attention."""
-
-    def __init__(self, num_heads: int, num_kv_heads: int, head_dim: int) -> None:
-        super().__init__()
-        self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads
-        self.head_dim = head_dim
-        self.num_kv_groups = num_heads // num_kv_heads
-
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        forward_batch: Any,
-        save_kv_cache: bool = True,
-    ) -> torch.Tensor:
-        seq_len = q.shape[0]
-        q = q.view(seq_len, self.num_heads, self.head_dim).unsqueeze(0).transpose(1, 2)
-        k = (
-            k.view(seq_len, self.num_kv_heads, self.head_dim)
-            .unsqueeze(0)
-            .transpose(1, 2)
-        )
-        v = (
-            v.view(seq_len, self.num_kv_heads, self.head_dim)
-            .unsqueeze(0)
-            .transpose(1, 2)
-        )
-
-        if self.num_kv_groups > 1:
-            k = k.repeat_interleave(self.num_kv_groups, dim=1)
-            v = v.repeat_interleave(self.num_kv_groups, dim=1)
-
-        out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
-        return out.transpose(1, 2).squeeze(0).reshape(seq_len, -1)
-
-
-def patch_talker_attention(talker_model: "Qwen3OmniTalker") -> None:
-    """Replace RadixAttention in the talker backbone with SDPA wrappers."""
-    text_model = talker_model.model
-    for layer in text_model.layers:
-        attn_mod = layer.self_attn
-        sdpa = _SDPAWrapper(
-            num_heads=attn_mod.num_heads,
-            num_kv_heads=attn_mod.num_kv_heads,
-            head_dim=attn_mod.head_dim,
-        )
-        attn_mod.attn = sdpa
-
-        rotary = attn_mod.rotary_emb
-        if rotary.cos_sin_cache.dtype != torch.float32:
-            rotary.cos_sin_cache = rotary.cos_sin_cache.to(torch.float32)
-
-        logger.info(
-            "Patched talker layer %d attention: RadixAttention → SDPA",
-            layer.layer_id,
-        )
-
-
-class _ExtendForwardMode:
-    """Stub forward mode that reports extend (prefill) mode."""
-
-    def is_extend(self) -> bool:
-        return True
-
-    def is_decode(self) -> bool:
-        return False
-
-    def is_idle(self) -> bool:
-        return False
-
-
-class _MockForwardBatch:
-    """Minimal ForwardBatch substitute for the SDPA-patched talker backbone.
-
-    Note (chenyang): The talker backbone does not use SGLang's inference
-    pipeline fully, including KV cache, radix tree, etc.  The attention layers
-    have been patched to plain SDPA (Scaled Dot-Product Attention ).  However
-    the decoder layer forward() signature still expects a ForwardBatch
-    object, so we provide this mock with the minimal fields required by
-    forward_prepare and LayerCommunicator.
-    """
-
-    def __init__(self, seq_len: int, device: torch.device) -> None:
-        self.seq_lens = torch.tensor([seq_len], device=device)
-        self.req_pool_indices = torch.zeros(1, dtype=torch.long, device=device)
-        self.seq_lens_sum = seq_len
-        self.out_cache_loc = torch.arange(seq_len, device=device)
-        self.forward_mode = _ExtendForwardMode()
-        self.total_num_tokens = seq_len
-        self.input_ids = torch.zeros(seq_len, dtype=torch.long, device=device)
-        self.batch_size = 1
-        self.is_extend_in_batch = True
-        self.global_num_tokens_cpu = None
-        self.num_token_non_padded = None
-        self.can_run_dp_cuda_graph = False
-        self.token_to_kv_pool = None
-        self.nsa_cp_metadata = None
-        self.extend_prefix_lens = None
-        self.extend_seq_lens = None
-        self.extend_logprob_start_lens = None
-        self.top_logprobs_nums = None
-        self.return_logprob = None
-        self.positions = None
-        self.mrope_positions = None
-        self.spec_info = None
-        self.capture_hidden_mode = None
+    return OmniEngine(scheduler=scheduler, model_runner=talker_model_runner)

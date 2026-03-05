@@ -233,6 +233,81 @@ def build_talker_request(
     )
 
 
+def build_sglang_talker_request(
+    state: PipelineState,
+    *,
+    params: dict[str, Any],
+    codec_vocab_size: int = 3072,
+    codec_eos_token_id: int = 2150,
+    request_id: str | None = None,
+) -> "SGLangARRequestData":
+    """Build SGLangARRequestData for the Talker stage.
+
+    Creates a SGLang Req with dummy input_ids (for KV cache allocation)
+    and stores thinker embeddings in extra_model_outputs for prefill injection.
+    """
+    from sglang.srt.managers.schedule_batch import Req
+    from sglang.srt.sampling.sampling_params import SamplingParams
+
+    from sglang_omni.engines.omni.runtime.sglang_ar import SGLangARRequestData
+
+    talker_inputs = state.talker_inputs
+    if not talker_inputs:
+        raise ValueError("talker_inputs missing on PipelineState")
+
+    thinker_embed = talker_inputs.get("thinker_embed")
+    thinker_hidden = talker_inputs.get("thinker_hidden")
+    is_multimodal_mask = talker_inputs.get("is_multimodal_mask")
+
+    if not isinstance(thinker_embed, torch.Tensor):
+        raise TypeError("talker_inputs.thinker_embed must be a torch.Tensor")
+    if not isinstance(thinker_hidden, torch.Tensor):
+        raise TypeError("talker_inputs.thinker_hidden must be a torch.Tensor")
+
+    # Dummy input_ids for KV cache slot allocation during prefill.
+    # The actual embeddings are injected by TalkerSGLangModelRunner.
+    seq_len = thinker_embed.shape[0]
+    input_ids_list = [0] * seq_len
+
+    max_new_tokens = params.get("max_new_tokens", 4096)
+    temperature = params.get("temperature", 0.9)
+    top_k = params.get("top_k", 50)
+
+    sampling_params = SamplingParams(
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_k=top_k,
+        stop_token_ids=[codec_eos_token_id],
+    )
+    sampling_params.normalize(tokenizer=None)
+    sampling_params.verify(codec_vocab_size)
+
+    rid = request_id or "talker-0"
+    req = Req(
+        rid=rid,
+        origin_input_text="",
+        origin_input_ids=input_ids_list,
+        sampling_params=sampling_params,
+        vocab_size=codec_vocab_size,
+    )
+
+    data = SGLangARRequestData(
+        input_ids=torch.tensor(input_ids_list, dtype=torch.long),
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        output_ids=req.output_ids,
+        req=req,
+    )
+
+    # Store thinker embeddings for prefill injection by TalkerSGLangModelRunner
+    data.extra_model_outputs["thinker_embed"] = thinker_embed
+    data.extra_model_outputs["thinker_hidden"] = thinker_hidden
+    if is_multimodal_mask is not None:
+        data.extra_model_outputs["is_multimodal_mask"] = is_multimodal_mask
+
+    return data
+
+
 def apply_talker_result(
     state: PipelineState,
     *,
@@ -240,6 +315,8 @@ def apply_talker_result(
     result: Any,
 ) -> TalkerOutput:
     """Store talker output (codec codes) on pipeline state."""
+    from sglang_omni.engines.omni.runtime.ar import ARRequestData
+
     if isinstance(result, TalkerRequestData):
         codec_dict = result.output_dict or {}
         codec_codes = codec_dict.get("codec_codes")
@@ -248,6 +325,14 @@ def apply_talker_result(
         talker_out: TalkerOutput = {
             "codec_codes": codec_codes,
             "step": 1,
+            "is_final": True,
+        }
+    elif isinstance(result, ARRequestData):
+        # SGLang AR talker: assemble codec codes from per-step code predictor output
+        codec_codes = _assemble_codec_codes_from_ar_result(result)
+        talker_out = {
+            "codec_codes": codec_codes,
+            "step": len(result.output_ids),
             "is_final": True,
         }
     elif isinstance(result, dict):
@@ -266,3 +351,60 @@ def apply_talker_result(
     state.talker_out = talker_out
     state.engine_outputs[stage_name] = talker_out
     return talker_out
+
+
+def _assemble_codec_codes_from_ar_result(result: Any) -> list:
+    """Assemble 16-layer codec codes from SGLang AR talker output.
+
+    The AR talker produces:
+    - result.output_ids: list of layer-0 codec token IDs (one per decode step)
+    - result.extra_model_outputs["codec_steps"]: list of per-step dicts with
+      "codec_codes" tensor [num_code_groups, 1] from the code predictor
+
+    Returns codec_codes as [num_code_groups][num_steps] nested list.
+    """
+    output_ids = list(result.output_ids)
+    codec_steps = result.extra_model_outputs.get("codec_steps", [])
+    num_steps = len(output_ids)
+
+    if num_steps == 0:
+        return []
+
+    # Determine num_code_groups from first step's codec_codes
+    if codec_steps:
+        first_codes = codec_steps[0].get("codec_codes")
+        if first_codes is not None and hasattr(first_codes, "shape"):
+            num_groups = first_codes.shape[0]
+        else:
+            num_groups = 16
+    else:
+        num_groups = 16
+
+    # Build [num_groups][num_steps] structure
+    all_codes: list[list[int]] = [[] for _ in range(num_groups)]
+
+    for step_idx in range(num_steps):
+        # Layer 0: from output_ids
+        all_codes[0].append(output_ids[step_idx])
+
+        # Layers 1..N-1: from code predictor
+        if step_idx < len(codec_steps):
+            step_data = codec_steps[step_idx]
+            step_codes = step_data.get("codec_codes")
+            if step_codes is not None and hasattr(step_codes, "tolist"):
+                codes_list = step_codes.tolist()
+                # step_codes shape is [num_groups, 1] — each group has 1 code
+                for g in range(1, num_groups):
+                    if g < len(codes_list):
+                        val = codes_list[g]
+                        all_codes[g].append(val[0] if isinstance(val, list) else val)
+                    else:
+                        all_codes[g].append(0)
+            else:
+                for g in range(1, num_groups):
+                    all_codes[g].append(0)
+        else:
+            for g in range(1, num_groups):
+                all_codes[g].append(0)
+
+    return all_codes

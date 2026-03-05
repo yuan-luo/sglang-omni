@@ -321,12 +321,11 @@ class Qwen3OmniMoeThinkerTextAttention(nn.Module):
     ):
         if hidden_states.shape[0] == 0:
             return hidden_states, forward_batch, None
-        if forward_batch.forward_mode.is_extend():
-            return self.forward_prepare_native(
-                positions=positions,
-                hidden_states=hidden_states,
-                forward_batch=forward_batch,
-            )
+        return self.forward_prepare_native(
+            positions=positions,
+            hidden_states=hidden_states,
+            forward_batch=forward_batch,
+        )
 
     def forward_core(self, intermediate_state):
         hidden_states, forward_batch, inner_state = intermediate_state

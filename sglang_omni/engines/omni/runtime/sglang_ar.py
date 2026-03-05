@@ -24,6 +24,11 @@ from ..types import (
 )
 from .ar import ARRequestData
 
+# Talker-specific request data key for thinker embeddings
+_THINKER_EMBED_KEY = "thinker_embed"
+_THINKER_HIDDEN_KEY = "thinker_hidden"
+_IS_MULTIMODAL_MASK_KEY = "is_multimodal_mask"
+
 if TYPE_CHECKING:
     from sglang.srt.server_args import ServerArgs
 
@@ -497,3 +502,149 @@ class SGLangModelRunner:
             for layer_idx, tensor in captured.items():
                 buf = data.hidden_states_buffer.setdefault(layer_idx, [])
                 buf.append(tensor[start:end].clone())
+
+
+class TalkerSGLangModelRunner(SGLangModelRunner):
+    """Model runner for the Talker stage.
+
+    Extends SGLangModelRunner with:
+    1. Prefill embedding injection: Before prefill, projects thinker outputs
+       to talker hidden dim and sets them on the model for input_embeds.
+    2. Code Predictor per-step hook: After each decode step, runs the
+       Code Predictor to generate residual RVQ codes (layers 1..15).
+    """
+
+    def execute(self, scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
+        from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+
+        schedule_batch = scheduler_output.batch_data
+        if schedule_batch is None:
+            return ModelRunnerOutput(outputs={}, req_ids=[], req_id_to_index={})
+
+        # Inject prefill embeddings for extend (prefill) batches
+        if schedule_batch.forward_mode.is_extend():
+            self._inject_prefill_embeds(schedule_batch)
+
+        model_worker_batch = schedule_batch.get_model_worker_batch()
+        forward_batch = ForwardBatch.init_new(
+            model_worker_batch, self.model_worker.model_runner
+        )
+
+        batch_result = self.model_worker.forward_batch_generation(forward_batch)
+
+        if schedule_batch.is_prefill_only:
+            batch_result.next_token_ids = torch.zeros(
+                len(model_worker_batch.seq_lens),
+                dtype=torch.long,
+                device=model_worker_batch.input_ids.device,
+            )
+        else:
+            batch_result.next_token_ids = self.model_worker.model_runner.sample(
+                batch_result.logits_output, forward_batch
+            )
+        schedule_batch.output_ids = batch_result.next_token_ids
+
+        # Code Predictor per-step hook: run after decode sampling
+        if (
+            not schedule_batch.is_prefill_only
+            and batch_result.next_token_ids is not None
+        ):
+            self._run_code_predictor(
+                batch_result, forward_batch, schedule_batch, scheduler_output
+            )
+
+        if self.batch_planner is not None:
+            self.batch_planner.record_last_batch(schedule_batch)
+
+        outputs = self.output_processor.process(batch_result, scheduler_output)
+
+        req_ids = [req.request_id for req in scheduler_output.requests]
+        req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
+
+        return ModelRunnerOutput(
+            outputs=outputs,
+            req_ids=req_ids,
+            req_id_to_index=req_id_to_index,
+        )
+
+    def _inject_prefill_embeds(self, schedule_batch: Any) -> None:
+        """Project thinker outputs and inject as prefill embeddings."""
+        model = self.model_worker.model_runner.model
+        device = self.model_worker.device
+
+        embeds_list: list[torch.Tensor] = []
+        for req in schedule_batch.reqs:
+            sched_req = self.batch_planner.req_id_map.get(req.rid)
+            if sched_req is None:
+                continue
+            data: SGLangARRequestData = sched_req.data
+            thinker_embed = data.extra_model_outputs.get(_THINKER_EMBED_KEY)
+            thinker_hidden = data.extra_model_outputs.get(_THINKER_HIDDEN_KEY)
+            is_multimodal_mask = data.extra_model_outputs.get(_IS_MULTIMODAL_MASK_KEY)
+            if thinker_embed is None or thinker_hidden is None:
+                continue
+
+            embeds = model.talker.prepare_input_embeds(
+                thinker_embeds=thinker_embed.to(device),
+                thinker_hidden_states=thinker_hidden.to(device),
+                is_multimodal_mask=(
+                    is_multimodal_mask.to(device)
+                    if is_multimodal_mask is not None
+                    else None
+                ),
+            )
+            embeds_list.append(embeds)
+
+        if embeds_list:
+            all_embeds = torch.cat(embeds_list, dim=0)
+            model.set_prefill_embeds(all_embeds)
+
+    def _run_code_predictor(
+        self,
+        batch_result: Any,
+        forward_batch: Any,
+        schedule_batch: Any,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
+        """Run Code Predictor after each decode step.
+
+        For each request in the batch that just produced a layer-0 code,
+        generate residual codes (layers 1..15) and store them on the request.
+        """
+        model = self.model_worker.model_runner.model
+        hidden_states = batch_result.logits_output.hidden_states
+        next_token_ids = batch_result.next_token_ids
+
+        if hidden_states is None or next_token_ids is None:
+            return
+
+        # Clone hidden states out of potential CUDA graph buffer
+        hidden_states = hidden_states.clone()
+
+        for i, sched_req in enumerate(scheduler_output.requests):
+            data: SGLangARRequestData = sched_req.data
+            token_id = int(next_token_ids[i])
+
+            # Skip if request just finished (EOS)
+            if data.req.finished():
+                continue
+
+            # Extract per-request hidden state [1, 1, hidden]
+            h_t = hidden_states[i : i + 1].unsqueeze(0)
+            layer0_code = torch.tensor(
+                [[token_id]], device=h_t.device, dtype=torch.long
+            )
+
+            # Run code predictor for this step
+            codec_codes, summed_embeds = model.talker.code_predictor_forward(
+                layer0_codes=layer0_code,
+                talker_hidden=h_t,
+            )
+
+            # Store per-step codec output on request for downstream (Code2Wav)
+            step_output = {
+                "codec_codes": codec_codes.squeeze(0),
+                "summed_codec_embeds": summed_embeds.squeeze(0),
+            }
+            buf = data.extra_model_outputs.setdefault("codec_steps", [])
+            buf.append(step_output)

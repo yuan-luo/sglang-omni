@@ -6,7 +6,7 @@ from .factory import (
     create_ar_engine,
     create_encoder_engine,
     create_sglang_ar_engine,
-    create_talker_codec_engine,
+    create_sglang_talker_ar_engine,
 )
 from .model_runner import ModelRunner
 from .runtime.ar import ARRequestData
@@ -39,6 +39,6 @@ __all__ = [
     "create_ar_engine",
     # AR (SGLang)
     "create_sglang_ar_engine",
-    # Talker
-    "create_talker_codec_engine",
+    # Talker (SGLang AR)
+    "create_sglang_talker_ar_engine",
 ]

@@ -3,40 +3,31 @@
 
 from __future__ import annotations
 
-import glob
-import json
-import os
 from typing import Any
 
 import torch
-from huggingface_hub import snapshot_download
-from safetensors.torch import load_file
 from sglang.srt.server_args import ServerArgs
 from transformers import AutoTokenizer
 
-from sglang_omni.config.qwen3_omni import Qwen3OmniMoeTalkerConfig
 from sglang_omni.engines.omni import (
     create_ar_engine,
     create_encoder_engine,
     create_sglang_ar_engine,
 )
-from sglang_omni.engines.omni.factory import (
-    create_talker_codec_engine,
-    patch_talker_attention,
-)
+from sglang_omni.engines.omni.factory import create_sglang_talker_ar_engine
 from sglang_omni.executors import EngineExecutor, PreprocessingExecutor
 from sglang_omni.models.qwen3_omni.components.audio_encoder import Qwen3OmniAudioEncoder
 from sglang_omni.models.qwen3_omni.components.image_encoder import Qwen3OmniImageEncoder
 from sglang_omni.models.qwen3_omni.components.preprocessor import Qwen3OmniPreprocessor
 from sglang_omni.models.qwen3_omni.components.thinker import Qwen3OmniSplitThinker
-from sglang_omni.models.qwen3_omni.io import OmniEvent, TalkerOutput, ThinkerOutput
+from sglang_omni.models.qwen3_omni.io import OmniEvent, ThinkerOutput
 from sglang_omni.models.qwen3_omni.pipeline.engine_io import (
     apply_encoder_result,
     apply_talker_result,
     apply_thinker_result,
     build_encoder_request,
+    build_sglang_talker_request,
     build_sglang_thinker_request,
-    build_talker_request,
     build_thinker_request,
 )
 from sglang_omni.models.qwen3_omni.pipeline.merge import (
@@ -50,7 +41,6 @@ from sglang_omni.models.qwen3_omni.pipeline.next_stage import (
     THINKER_STAGE,
 )
 from sglang_omni.models.qwen3_omni.pipeline.state_io import load_state, store_state
-from sglang_omni.models.qwen3_omni.talker import Qwen3OmniTalker
 from sglang_omni.proto import StagePayload
 
 
@@ -349,46 +339,58 @@ def create_sglang_thinker_executor_from_config(
 
 
 def create_sglang_talker_executor(
-    talker_model: Any,
+    server_args: Any,
+    model_path: str,
     *,
     gpu_id: int = 0,
 ) -> EngineExecutor:
-    """Create a talker executor backed by the Qwen3OmniTalker model."""
+    """Create a talker executor backed by SGLang's ModelWorker with AR generation."""
+
+    codec_vocab_size = 3072
+    codec_eos_token_id = 2150
+
+    step_counters: dict[str, int] = {}
 
     def _request_builder(payload: StagePayload):
         state = load_state(payload)
-        return build_talker_request(state, params=payload.request.params)
+        step_counters.pop(payload.request_id, None)
+        return build_sglang_talker_request(
+            state,
+            params=payload.request.params,
+            codec_vocab_size=codec_vocab_size,
+            codec_eos_token_id=codec_eos_token_id,
+            request_id=payload.request_id,
+        )
 
     def _result_builder(payload: StagePayload, result: Any) -> StagePayload:
         state = load_state(payload)
         apply_talker_result(state, stage_name=TALKER_STAGE, result=result)
+        step_counters.pop(payload.request_id, None)
         return store_state(payload, state)
 
     def _stream_builder(payload: StagePayload | None, item: Any) -> Any:
         if payload is None:
             return None
-        if not isinstance(item, dict):
-            return {"codec_output": item}
-        codec_codes = item.get("codec_codes")
-        if codec_codes is None:
-            return item
+        request_id = payload.request_id
+        step = step_counters.get(request_id, 0) + 1
+        step_counters[request_id] = step
 
-        talker_out: TalkerOutput = {
-            "codec_codes": (
-                codec_codes.tolist()
-                if isinstance(codec_codes, torch.Tensor)
-                else codec_codes
-            ),
-            "step": 1,
-            "is_final": True,
-        }
-        events = list(decode_codec_events(talker_out=talker_out, step=1))
-        return {
-            "events": [_event_to_dict(event) for event in events],
+        try:
+            token_id = int(item)
+        except (ValueError, TypeError):
+            return {"codec_token": item, "step": step}
+
+        result: dict[str, Any] = {
+            "codec_token_id": token_id,
+            "step": step,
             "stage": TALKER_STAGE,
         }
+        return result
 
-    engine = create_talker_codec_engine(talker_model=talker_model, gpu_id=gpu_id)
+    engine = create_sglang_talker_ar_engine(
+        server_args=server_args,
+        gpu_id=gpu_id,
+    )
 
     return EngineExecutor(
         engine=engine,
@@ -406,66 +408,28 @@ def create_sglang_talker_executor_from_config(
     server_args_overrides: dict[str, Any] | None = None,
 ) -> EngineExecutor:
     """Create a talker executor from JSON-serializable config args."""
+    server_args_kwargs: dict[str, Any] = {
+        "model_path": model_path,
+        "trust_remote_code": True,
+        "tp_size": 1,
+        "pp_size": 1,
+        "disable_cuda_graph": True,
+        "chunked_prefill_size": 8192,
+        "max_prefill_tokens": 8192,
+        "max_running_requests": 16,
+        "mem_fraction_static": 0.6,
+        "random_seed": 123,
+        "context_length": talker_max_seq_len,
+    }
+    if server_args_overrides:
+        server_args_kwargs.update(server_args_overrides)
 
-    talker_config = _load_talker_config(model_path)
-    talker_model = Qwen3OmniTalker(talker_config)
-
-    checkpoint_weights = _load_checkpoint_weights(model_path)
-    talker_model.load_weights(checkpoint_weights)
-    talker_model = talker_model.to(device=f"cuda:{gpu_id}", dtype=torch.bfloat16).eval()
-
-    patch_talker_attention(talker_model)
-
-    return create_sglang_talker_executor(talker_model=talker_model, gpu_id=gpu_id)
-
-
-def _load_talker_config(model_path: str) -> Any:
-    """Load talker config from model path."""
-
-    if not os.path.isdir(model_path):
-        model_path = snapshot_download(model_path, local_files_only=True)
-
-    config_path = os.path.join(model_path, "config.json")
-    if not os.path.exists(config_path):
-        return Qwen3OmniMoeTalkerConfig()
-
-    with open(config_path) as f:
-        raw_config = json.load(f)
-
-    talker_cfg = raw_config.get("talker_config", {})
-    return Qwen3OmniMoeTalkerConfig(**talker_cfg)
-
-
-def _load_checkpoint_weights(
-    model_path: str,
-    prefix: str = "talker.",
-) -> list[tuple[str, torch.Tensor]]:
-    """Load checkpoint weights that match *prefix* from safetensors files."""
-    if not os.path.isdir(model_path):
-        model_path = snapshot_download(model_path, local_files_only=True)
-
-    index_path = os.path.join(model_path, "model.safetensors.index.json")
-
-    if os.path.exists(index_path):
-        with open(index_path) as f:
-            index = json.load(f)
-        weight_map: dict[str, str] = index.get("weight_map", {})
-        needed_files: set[str] = set()
-        for key, shard_file in weight_map.items():
-            if key.startswith(prefix):
-                needed_files.add(shard_file)
-        shard_paths = sorted(os.path.join(model_path, f) for f in needed_files)
-    else:
-        shard_paths = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
-
-    weights: list[tuple[str, torch.Tensor]] = []
-    for sf_path in shard_paths:
-        state_dict = load_file(sf_path)
-        for name, tensor in state_dict.items():
-            if name.startswith(prefix):
-                weights.append((name, tensor))
-
-    return weights
+    server_args = ServerArgs(**server_args_kwargs)
+    return create_sglang_talker_executor(
+        server_args=server_args,
+        model_path=model_path,
+        gpu_id=gpu_id,
+    )
 
 
 def create_decode_executor(model_path: str) -> PreprocessingExecutor:
