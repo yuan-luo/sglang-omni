@@ -321,18 +321,8 @@ def decode_events(
     ]
 
 
-# ---------------------------------------------------------------------------
-# Talker merge / decode helpers
-# ---------------------------------------------------------------------------
-
-
 def merge_for_talker(payloads: dict[str, StagePayload]) -> StagePayload:
-    """Extract thinker hidden states and build talker_inputs on PipelineState.
-
-    The thinker stage stores captured hidden states (layer 0 embedding and
-    layer N hidden) in ``thinker_out.extra_model_outputs``.  This function
-    unpacks them into ``state.talker_inputs`` for the talker engine.
-    """
+    """Extract thinker hidden states and build talker_inputs on PipelineState."""
     base = next(iter(payloads.values()))
     state = PipelineState.from_dict(base.data)
 

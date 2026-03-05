@@ -3,23 +3,33 @@
 
 from __future__ import annotations
 
+import glob
+import json
+import os
 from typing import Any
 
 import torch
+from huggingface_hub import snapshot_download
+from safetensors.torch import load_file
 from sglang.srt.server_args import ServerArgs
 from transformers import AutoTokenizer
 
+from sglang_omni.config.qwen3_omni import Qwen3OmniMoeTalkerConfig
 from sglang_omni.engines.omni import (
     create_ar_engine,
     create_encoder_engine,
     create_sglang_ar_engine,
+)
+from sglang_omni.engines.omni.factory import (
+    create_talker_codec_engine,
+    patch_talker_attention,
 )
 from sglang_omni.executors import EngineExecutor, PreprocessingExecutor
 from sglang_omni.models.qwen3_omni.components.audio_encoder import Qwen3OmniAudioEncoder
 from sglang_omni.models.qwen3_omni.components.image_encoder import Qwen3OmniImageEncoder
 from sglang_omni.models.qwen3_omni.components.preprocessor import Qwen3OmniPreprocessor
 from sglang_omni.models.qwen3_omni.components.thinker import Qwen3OmniSplitThinker
-from sglang_omni.models.qwen3_omni.io import OmniEvent, ThinkerOutput
+from sglang_omni.models.qwen3_omni.io import OmniEvent, TalkerOutput, ThinkerOutput
 from sglang_omni.models.qwen3_omni.pipeline.engine_io import (
     apply_encoder_result,
     apply_talker_result,
@@ -40,6 +50,7 @@ from sglang_omni.models.qwen3_omni.pipeline.next_stage import (
     THINKER_STAGE,
 )
 from sglang_omni.models.qwen3_omni.pipeline.state_io import load_state, store_state
+from sglang_omni.models.qwen3_omni.talker import Qwen3OmniTalker
 from sglang_omni.proto import StagePayload
 
 
@@ -118,7 +129,7 @@ def create_thinker_executor(
 ) -> EngineExecutor:
     model = Qwen3OmniSplitThinker(model_path=model_path, device=device, dtype=dtype)
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    eos_token_id = tokenizer.eos_token_id
 
     step_counters: dict[str, int] = {}
 
@@ -206,8 +217,8 @@ def create_sglang_thinker_executor(
 ) -> EngineExecutor:
     """Create a thinker executor backed by SGLang's ModelWorker."""
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    eos_token_id = getattr(tokenizer, "eos_token_id", None)
-    vocab_size = getattr(tokenizer, "vocab_size", 32000)
+    eos_token_id = tokenizer.eos_token_id
+    vocab_size = tokenizer.vocab_size
 
     step_counters: dict[str, int] = {}
 
@@ -226,7 +237,7 @@ def create_sglang_thinker_executor(
         state = load_state(payload)
         apply_thinker_result(state, stage_name=THINKER_STAGE, result=result)
         step_counters.pop(payload.request_id, None)
-        # Populate talker_inputs from captured hidden states for downstream talker stage
+
         extra = {}
         if state.thinker_out and isinstance(state.thinker_out, dict):
             extra = state.thinker_out.get("extra_model_outputs", {})
@@ -274,12 +285,9 @@ def create_sglang_thinker_executor(
         for event in events:
             if event.modality == "text" and "text" in event.payload:
                 if event.is_final:
-                    # If a final text event is found, it contains the complete text for this step.
-                    # This should override any accumulated delta.
                     text_to_add = event.payload["text"]
-                    break  # No need to process further events for text accumulation
+                    break
                 else:
-                    # Accumulate text from non-final delta events
                     text_to_add += event.payload["text"]
 
         result: dict[str, Any] = {
@@ -292,9 +300,6 @@ def create_sglang_thinker_executor(
             result["text"] = text_to_add
         return result
 
-    # Capture thinker embedding (layer -1) and layer 24 (accept_hidden_layer)
-    # for relay to the talker stage.  Layer -1 is a sentinel that hooks
-    # embed_tokens instead of a decoder layer.
     capture_hidden_layers = [-1, 24]
 
     engine = create_sglang_ar_engine(
@@ -318,11 +323,7 @@ def create_sglang_thinker_executor_from_config(
     thinker_max_seq_len: int = 8192,
     server_args_overrides: dict[str, Any] | None = None,
 ) -> EngineExecutor:
-    """Create a SGLang thinker executor from JSON-serializable config args.
-
-    This keeps pipeline config args plain dict types while still constructing
-    a typed ServerArgs object internally.
-    """
+    """Create a SGLang thinker executor from JSON-serializable config args."""
     server_args_kwargs: dict[str, Any] = {
         "model_path": model_path,
         "trust_remote_code": True,
@@ -353,7 +354,6 @@ def create_sglang_talker_executor(
     gpu_id: int = 0,
 ) -> EngineExecutor:
     """Create a talker executor backed by the Qwen3OmniTalker model."""
-    from sglang_omni.engines.omni.factory import create_talker_codec_engine
 
     def _request_builder(payload: StagePayload):
         state = load_state(payload)
@@ -372,11 +372,12 @@ def create_sglang_talker_executor(
         codec_codes = item.get("codec_codes")
         if codec_codes is None:
             return item
-        from sglang_omni.models.qwen3_omni.io import TalkerOutput
 
         talker_out: TalkerOutput = {
             "codec_codes": (
-                codec_codes.tolist() if hasattr(codec_codes, "tolist") else codec_codes
+                codec_codes.tolist()
+                if isinstance(codec_codes, torch.Tensor)
+                else codec_codes
             ),
             "step": 1,
             "is_final": True,
@@ -404,13 +405,7 @@ def create_sglang_talker_executor_from_config(
     talker_max_seq_len: int = 4096,
     server_args_overrides: dict[str, Any] | None = None,
 ) -> EngineExecutor:
-    """Create a talker executor from JSON-serializable config args.
-
-    Loads the Qwen3OmniTalker model and patches RadixAttention with SDPA
-    so it can run without a full SGLang ModelWorker.
-    """
-    from sglang_omni.engines.omni.factory import patch_talker_attention
-    from sglang_omni.models.qwen3_omni.talker import Qwen3OmniTalker
+    """Create a talker executor from JSON-serializable config args."""
 
     talker_config = _load_talker_config(model_path)
     talker_model = Qwen3OmniTalker(talker_config)
@@ -426,19 +421,9 @@ def create_sglang_talker_executor_from_config(
 
 def _load_talker_config(model_path: str) -> Any:
     """Load talker config from model path."""
-    import json
-    import os
 
-    from sglang_omni.config.qwen3_omni import Qwen3OmniMoeTalkerConfig
-
-    # Resolve HuggingFace model IDs to local snapshot paths
     if not os.path.isdir(model_path):
-        try:
-            from huggingface_hub import snapshot_download
-
-            model_path = snapshot_download(model_path, local_files_only=True)
-        except Exception:
-            pass
+        model_path = snapshot_download(model_path, local_files_only=True)
 
     config_path = os.path.join(model_path, "config.json")
     if not os.path.exists(config_path):
@@ -455,25 +440,9 @@ def _load_checkpoint_weights(
     model_path: str,
     prefix: str = "talker.",
 ) -> list[tuple[str, torch.Tensor]]:
-    """Load checkpoint weights that match *prefix* from safetensors files.
-
-    Uses ``model.safetensors.index.json`` (if present) to load only the
-    shard files that actually contain matching keys, avoiding the need to
-    read every shard (~70 GB for the full model).
-    """
-    import json
-    import os
-
-    from safetensors.torch import load_file
-
-    # Resolve HuggingFace model IDs to local snapshot paths
+    """Load checkpoint weights that match *prefix* from safetensors files."""
     if not os.path.isdir(model_path):
-        try:
-            from huggingface_hub import snapshot_download
-
-            model_path = snapshot_download(model_path, local_files_only=True)
-        except Exception:
-            pass
+        model_path = snapshot_download(model_path, local_files_only=True)
 
     index_path = os.path.join(model_path, "model.safetensors.index.json")
 
@@ -481,15 +450,12 @@ def _load_checkpoint_weights(
         with open(index_path) as f:
             index = json.load(f)
         weight_map: dict[str, str] = index.get("weight_map", {})
-        # Collect only the shard files that contain keys starting with prefix
         needed_files: set[str] = set()
         for key, shard_file in weight_map.items():
             if key.startswith(prefix):
                 needed_files.add(shard_file)
         shard_paths = sorted(os.path.join(model_path, f) for f in needed_files)
     else:
-        import glob
-
         shard_paths = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
 
     weights: list[tuple[str, torch.Tensor]] = []
@@ -504,14 +470,13 @@ def _load_checkpoint_weights(
 
 def create_decode_executor(model_path: str) -> PreprocessingExecutor:
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    eos_token_id = tokenizer.eos_token_id
 
     def _decode(payload: StagePayload) -> StagePayload:
         state = load_state(payload)
         events: list[OmniEvent] = []
         result: dict[str, Any] = {}
 
-        # Decode thinker text output
         thinker_out = state.thinker_out or state.engine_outputs.get(THINKER_STAGE)
         if isinstance(thinker_out, dict):
             step = int(
@@ -530,17 +495,12 @@ def create_decode_executor(model_path: str) -> PreprocessingExecutor:
 
             if "text" not in result:
                 output_ids = thinker_out.get("output_ids")
-                if (
-                    callable(getattr(tokenizer, "decode", None))
-                    and isinstance(output_ids, list)
-                    and output_ids
-                ):
+                if isinstance(output_ids, list) and output_ids:
                     result["text"] = tokenizer.decode(
                         output_ids, skip_special_tokens=True
                     )
                     result.setdefault("modality", "text")
 
-        # Decode talker codec output
         talker_out = state.talker_out or state.engine_outputs.get(TALKER_STAGE)
         if isinstance(talker_out, dict):
             codec_events = list(
@@ -555,8 +515,6 @@ def create_decode_executor(model_path: str) -> PreprocessingExecutor:
             if codec_codes:
                 result["codec_codes"] = codec_codes
                 result.setdefault("modality", "audio")
-                # Expose codec_codes as audio_data so the client can
-                # surface them in the API response.
                 result["audio_data"] = codec_codes
 
         event_dicts = [_event_to_dict(event) for event in events]

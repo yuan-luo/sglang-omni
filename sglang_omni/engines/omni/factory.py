@@ -284,18 +284,7 @@ def create_talker_codec_engine(
     talker_model: "Qwen3OmniTalker",
     gpu_id: int = 0,
 ) -> OmniEngine:
-    """Create a talker engine for single-pass codec generation.
-
-    Reuses generic scheduler components (SimpleResourceManager,
-    SinglePassIterationController) instead of talker-specific ones.
-
-    Args:
-        talker_model: Pre-loaded Qwen3OmniTalker model instance.
-        gpu_id: GPU device ID.
-
-    Returns:
-        OmniEngine configured for talker codec generation.
-    """
+    """Create a talker engine for single-pass codec generation."""
     device = torch.device(f"cuda:{gpu_id}")
 
     scheduler = Scheduler(

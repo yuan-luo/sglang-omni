@@ -15,26 +15,6 @@ if TYPE_CHECKING:
     from sglang_omni.engines.omni.runtime.sglang_ar import SGLangARRequestData
 
 
-# ---------------------------------------------------------------------------
-# Talker request data
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class TalkerRequestData:
-    """Per-request data for the talker codec generation stage.
-
-    Stores thinker outputs (embeddings + hidden states) and receives codec
-    generation results via ``output_dict``, which is populated by
-    ``SinglePassIterationController`` after the model runner finishes.
-    """
-
-    thinker_embed: torch.Tensor  # [seq_len, thinker_hidden_size]
-    thinker_hidden: torch.Tensor  # [seq_len, thinker_hidden_size]
-    is_multimodal_mask: torch.Tensor | None = None  # [seq_len] bool
-    output_dict: dict[str, Any] | None = None  # Populated by engine
-
-
 def build_encoder_request(
     state: PipelineState, *, stage_name: str
 ) -> EncoderRequestData:
@@ -216,9 +196,14 @@ def apply_thinker_result(
     return thinker_out
 
 
-# ---------------------------------------------------------------------------
-# Talker helpers
-# ---------------------------------------------------------------------------
+@dataclass
+class TalkerRequestData:
+    """Per-request data for the talker codec generation stage."""
+
+    thinker_embed: torch.Tensor
+    thinker_hidden: torch.Tensor
+    is_multimodal_mask: torch.Tensor | None = None
+    output_dict: dict[str, Any] | None = None
 
 
 def build_talker_request(
@@ -226,11 +211,8 @@ def build_talker_request(
     *,
     params: dict[str, Any],
 ) -> TalkerRequestData:
-    """Build TalkerRequestData from pipeline state.
+    """Build TalkerRequestData from pipeline state."""
 
-    Extracts thinker hidden states from talker_inputs and wraps them
-    into a TalkerRequestData for the talker codec engine.
-    """
     talker_inputs = state.talker_inputs
     if not talker_inputs:
         raise ValueError("talker_inputs missing on PipelineState")
