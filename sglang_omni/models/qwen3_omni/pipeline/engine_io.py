@@ -96,10 +96,7 @@ def _compute_mrope_positions(
     model_inputs: dict[str, Any],
     thinker_config: Any,
 ) -> torch.Tensor | None:
-    """Compute M-RoPE positions for multimodal inputs.
-
-    Returns a [3, seq_len] tensor of mrope positions, or None if no visual data.
-    """
+    """Compute M-RoPE positions for multimodal inputs."""
     from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
 
     image_grid_thw = model_inputs.get("image_grid_thw")

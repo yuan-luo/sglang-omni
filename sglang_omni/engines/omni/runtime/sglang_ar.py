@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
+from sglang.srt.managers.scheduler import GenerationBatchResult
 from sglang.srt.mem_cache.common import release_kv_cache
 
 from ..types import (
@@ -291,9 +292,10 @@ class SGLangIterationController:
 
 
 class SGLangModelRunner:
-    """Bypasses outer Qwen3VLForConditionalGeneration (which doesn't accept
-    input_embeds) by calling the inner language model directly for multimodal
-    prefills. Decode steps use the standard SGLang path.
+    """Model runner that uses SGLang's ModelWorker for execution.
+
+    Replaces the generic ModelRunner — handles ScheduleBatch → ForwardBatch
+    conversion, forward pass, and conditional sampling.
     """
 
     def __init__(
@@ -309,6 +311,16 @@ class SGLangModelRunner:
         model = model_worker.model_runner.model
         self._embed_tokens, self._inner_model = self._get_inner_model_components(model)
 
+        hf_config = model_worker.model_runner.model_config.hf_config
+        thinker_cfg = (
+            hf_config.thinker_config
+            if hasattr(hf_config, "thinker_config")
+            else hf_config
+        )
+        self._image_token_id = thinker_cfg.image_token_id
+        self._video_token_id = thinker_cfg.video_token_id
+        self._audio_token_id = thinker_cfg.audio_token_id
+
     @staticmethod
     def _get_inner_model_components(model):
         outer = model.thinker if hasattr(model, "thinker") else model
@@ -317,15 +329,14 @@ class SGLangModelRunner:
     def _inject_multimodal_embeds(
         self, forward_batch: Any, schedule_batch: Any
     ) -> tuple[torch.Tensor | None, list | None, torch.Tensor | None]:
-        """Returns (input_embeds, deepstack_visual_embeds, visual_pos_masks)."""
+
         if not any(req.omni_model_inputs is not None for req in schedule_batch.reqs):
             return None, None, None
 
         device = forward_batch.input_ids.device
-        hf_config = self.model_worker.model_runner.model_config.hf_config
-        image_token_id = hf_config.image_token_id
-        video_token_id = hf_config.video_token_id
-        audio_token_id = hf_config.audio_token_id
+        image_token_id = self._image_token_id
+        video_token_id = self._video_token_id
+        audio_token_id = self._audio_token_id
 
         input_embeds = self._embed_tokens(forward_batch.input_ids)
 
@@ -446,7 +457,6 @@ class SGLangModelRunner:
         deepstack_visual_embeds: list | None = None,
         visual_pos_masks: torch.Tensor | None = None,
     ) -> Any:
-        from sglang.srt.managers.scheduler import GenerationBatchResult
 
         model_runner = self.model_worker.model_runner
         outer = self._inner_model
@@ -462,8 +472,6 @@ class SGLangModelRunner:
             positions=positions,
             forward_batch=forward_batch,
             input_embeds=input_embeds,
-            deepstack_visual_embeds=deepstack_visual_embeds,
-            visual_pos_masks=visual_pos_masks,
         )
 
         logits_output = outer.logits_processor(
