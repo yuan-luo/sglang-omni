@@ -394,26 +394,14 @@ class SGLangIterationController:
 
 
 class HiddenStateCaptureHook:
-    """Captures intermediate hidden states from specific decoder layers.
-
-    Uses register_forward_hook on decoder layers to capture output tensors.
-    NOT thread-safe: hook execution and ``pop_captured()`` must be called
-    from the same thread (the model forward thread).
-    """
+    """Captures intermediate hidden states from specific decoder layers."""
 
     def __init__(self) -> None:
         self._captured: dict[int, torch.Tensor] = {}
         self._handles: list[Any] = []
 
     def register(self, model: Any, layer_indices: list[int]) -> None:
-        """Register hooks on specific decoder layers of the thinker model.
-
-        Args:
-            model: The thinker text model (Qwen3OmniMoeThinkerTextModel)
-                   Expected to have model.layers attribute.
-            layer_indices: Layer indices to capture.
-                           Use -1 as sentinel for the embedding layer (embed_tokens).
-        """
+        """Register hooks on specific decoder layers of the thinker model."""
         layers = _get_model_layers(model)
         if layers is None:
             logger.warning("Cannot find model layers for hidden state capture")
@@ -421,7 +409,6 @@ class HiddenStateCaptureHook:
 
         for idx in layer_indices:
             if idx == -1:
-                # Hook the embedding layer output instead of a decoder layer
                 embed_module = _get_embed_tokens(model)
                 if embed_module is not None:
                     handle = embed_module.register_forward_hook(self._make_hook(idx))
@@ -440,6 +427,12 @@ class HiddenStateCaptureHook:
             self._handles.append(handle)
 
     def _make_hook(self, layer_idx: int):
+        """Create a forward hook that captures the hidden state for layer_idx.
+
+        Note that decoder layers may return (hidden, ...) tuples or a bare
+        tensor depending on the model implementation.
+        """
+
         def _hook(module: Any, input_args: Any, output: Any) -> None:
             if isinstance(output, tuple) and len(output) >= 1:
                 hidden = output[0]
@@ -505,19 +498,11 @@ def _get_embed_tokens(model: Any) -> Any | None:
     return None
 
 
-# -----------------------------------------------------------------------------
-# SGLangModelRunner (duck-typed replacement for ModelRunner)
-# -----------------------------------------------------------------------------
-
-
 class SGLangModelRunner:
     """Model runner that uses SGLang's ModelWorker for execution.
 
-    Replaces the generic ModelRunner — handles ScheduleBatch → ForwardBatch
-    conversion, forward pass, and conditional sampling.
-
-    Optionally captures intermediate hidden states via forward hooks for
-    thinker-to-talker relay.
+    Note that SGLangModelRunner optionally captures intermediate
+    hidden states via forward hooks for thinker-to-talker architecture.
     """
 
     def __init__(
