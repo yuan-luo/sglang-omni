@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import logging
 
+import pytest
 import torch
 from transformers import AutoTokenizer
 
@@ -222,6 +223,19 @@ async def run_e2e(
 
     print("\n=== E2E TEST PASSED ===")
     return result
+
+
+MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
+
+
+@pytest.mark.e2e
+def test_thinker_talker_e2e() -> None:
+    """Pytest entry: thinker → talker → decode pipeline."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required for thinker-talker E2E test")
+    asyncio.run(
+        run_e2e(model_path=MODEL_PATH, prompt="Hello, how are you?")
+    )
 
 
 def main():

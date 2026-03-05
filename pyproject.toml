@@ -51,6 +51,11 @@ gradio = ["gradio>=4.0.0"]
 [project.scripts]
 sgl-omni = "sglang_omni.cli.cli:app"
 
+[tool.pytest.ini_options]
+markers = [
+    "e2e: end-to-end tests requiring large models and GPU (deselect with '-m \"not e2e\"')",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["sglang_omni*"]
