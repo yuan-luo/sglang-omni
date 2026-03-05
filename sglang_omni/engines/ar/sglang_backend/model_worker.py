@@ -10,6 +10,8 @@ from .model_runner import SGLModelRunner
 
 
 def _find_free_port() -> int:
+    # TODO (chenyang): we can port this
+    # function from sglang but not right now
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
