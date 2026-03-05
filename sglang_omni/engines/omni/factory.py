@@ -266,11 +266,24 @@ def create_sglang_ar_engine(
         iteration_controller=iteration_ctrl,
         stream_adapter=_stream_adapter,
     )
+    # Resolve decoder layers and embed_tokens for hidden state capture.
+    # The model structure depends on the architecture (e.g. model.thinker.model
+    # for Qwen3-Omni, model.model for Llama). The caller that knows the model
+    # architecture is responsible for passing the right sub-modules.
+    decoder_layers = None
+    embed_tokens = None
+    if capture_hidden_layers:
+        inner = model_worker.model_runner.model.thinker.model
+        decoder_layers = inner.layers
+        embed_tokens = inner.embed_tokens
+
     sglang_model_runner = SGLangModelRunner(
         model_worker,
         output_proc,
         batch_planner=batch_planner,
         capture_hidden_layers=capture_hidden_layers,
+        decoder_layers=decoder_layers,
+        embed_tokens=embed_tokens,
     )
 
     return OmniEngine(scheduler=scheduler, model_runner=sglang_model_runner)

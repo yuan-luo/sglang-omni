@@ -34,34 +34,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# -----------------------------------------------------------------------------
-# Data Structures
-# -----------------------------------------------------------------------------
-
-
 @dataclass
 class SGLangARRequestData(ARRequestData):
-    """SGLang-specific AR request data.
-
-    Subclasses ARRequestData so isinstance(result, ARRequestData) passes
-    and all existing field accesses (.output_ids, .extra_model_outputs) work.
-    """
+    """SGLang specific AR request data."""
 
     req: Any = None
     synced: bool = False
     hidden_states_buffer: dict[int, list[torch.Tensor]] = field(default_factory=dict)
 
 
-# -----------------------------------------------------------------------------
-# BatchPlanner
-# -----------------------------------------------------------------------------
-
-
 class SGLangBatchPlanner:
-    """Batch planner that delegates to SGLang's PrefillManager and DecodeManager.
-
-    Implements the BatchPlanner protocol (select_requests, build_batch).
-    """
+    """Batch planner that delegates to SGLang's PrefillManager and DecodeManager."""
 
     def __init__(
         self,
@@ -74,7 +57,6 @@ class SGLangBatchPlanner:
         self.server_args = server_args
         self.last_batch: Any | None = None
         self.forward_ct: int = 0
-        # Maps SGLang req.rid -> OmniEngine SchedulerRequest
         self.req_id_map: dict[str, SchedulerRequest] = {}
         self._cached_schedule_batch: Any | None = None
 
@@ -84,13 +66,11 @@ class SGLangBatchPlanner:
         running: list[SchedulerRequest],
         resource_manager: Any,
     ) -> list[SchedulerRequest]:
-        # 1. Post-step from previous batch
         self._post_step_operations()
         active_request_ids = {req.request_id for req in waiting}
         active_request_ids.update(req.request_id for req in running)
         self._prune_inactive_state(active_request_ids)
 
-        # 2. Sync new SchedulerRequests to PrefillManager
         for sched_req in waiting:
             data: SGLangARRequestData = sched_req.data
             if not data.synced:
@@ -98,7 +78,6 @@ class SGLangBatchPlanner:
                 data.synced = True
                 self.req_id_map[data.req.rid] = sched_req
 
-        # 3. Try prefill first
         running_batch = self.decode_manager.running_batch
         if hasattr(running_batch, "batch_size"):
             running_bs = running_batch.batch_size()
@@ -122,7 +101,6 @@ class SGLangBatchPlanner:
             new_token_ratio=self.decode_manager.new_token_ratio,
         )
 
-        # 4. Fallback to decode
         if schedule_batch is None and self.decode_manager.runnable:
             schedule_batch = self.decode_manager.schedule_next_batch(self.forward_ct)
 
@@ -133,7 +111,6 @@ class SGLangBatchPlanner:
         self._cached_schedule_batch = schedule_batch
         self.forward_ct += 1
 
-        # Map ScheduleBatch reqs back to SchedulerRequests
         selected: list[SchedulerRequest] = []
         keep_indices: list[int] = []
         for i, req in enumerate(schedule_batch.reqs):
@@ -169,8 +146,6 @@ class SGLangBatchPlanner:
             self.prefill_manager.tree_cache.cache_unfinished_req(
                 active_chunked_req, chunked=True
             )
-            # Reuse req_to_token slot across chunk rounds; otherwise long chunked
-            # prompts can exhaust req_to_token_pool entries.
             if getattr(active_chunked_req, "req_pool_idx", None) is not None:
                 self.prefill_manager.req_to_token_pool.free(
                     active_chunked_req.req_pool_idx
@@ -196,7 +171,6 @@ class SGLangBatchPlanner:
                 else:
                     self.decode_manager.running_batch.merge_batch(self.last_batch)
 
-        # Filter finished requests from decode running_batch
         if not self.decode_manager.running_batch.is_empty():
             finished_indices = []
             for i, req in enumerate(self.decode_manager.running_batch.reqs):
@@ -270,17 +244,8 @@ class SGLangBatchPlanner:
             )
 
 
-# -----------------------------------------------------------------------------
-# ResourceManager
-# -----------------------------------------------------------------------------
-
-
 class SGLangResourceManager:
-    """Resource manager that delegates KV cache management to SGLang internals.
-
-    PrefillAdder handles real allocation checks internally, so can_allocate/allocate
-    are pass-throughs. KV release happens only in free().
-    """
+    """Resource manager that delegates KV cache management to SGLang internals."""
 
     def __init__(self, token_to_kv_pool_allocator, req_to_token_pool, tree_cache):
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
@@ -297,11 +262,6 @@ class SGLangResourceManager:
         data: SGLangARRequestData = request.data
         if data.req is not None:
             release_kv_cache(data.req, self.tree_cache)
-
-
-# -----------------------------------------------------------------------------
-# OutputProcessor
-# -----------------------------------------------------------------------------
 
 
 class SGLangOutputProcessor:
@@ -329,17 +289,8 @@ class SGLangOutputProcessor:
         return outputs
 
 
-# -----------------------------------------------------------------------------
-# IterationController
-# -----------------------------------------------------------------------------
-
-
 class SGLangIterationController:
-    """Handles per-request state updates with chunked prefill semantics.
-
-    Chunked prefill: req.is_chunked > 0 means the request is still in
-    chunked prefill — decrement counter, do NOT append token or check finish.
-    """
+    """Handles per-request state updates with chunked prefill semantics."""
 
     HIDDEN_LAYER_KEY_MAP: dict[int, str] = {
         -1: "thinker_embed",
@@ -354,19 +305,14 @@ class SGLangIterationController:
         req = data.req
 
         if req.is_chunked > 0:
-            # Suppress stream emission for this chunk. Scheduler emits stream
-            # after update_request(), so marking output None here avoids races.
             output.data = None
             req.is_chunked -= 1
             return
 
         token_id = output.data
         if token_id is not None:
-            # output_ids is shared: req.output_ids IS data.output_ids
             req.output_ids.append(token_id)
             req.check_finished()
-            # Mirror upstream prefill behavior: unfinished prefill requests
-            # should insert/update prefix cache after extend step.
             if not req.finished() and getattr(req, "decode_batch_idx", 0) == 0:
                 self.tree_cache.cache_unfinished_req(req)
 
@@ -400,30 +346,27 @@ class HiddenStateCaptureHook:
         self._captured: dict[int, torch.Tensor] = {}
         self._handles: list[Any] = []
 
-    def register(self, model: Any, layer_indices: list[int]) -> None:
-        """Register hooks on specific decoder layers of the thinker model."""
-        layers = _get_model_layers(model)
-        if layers is None:
-            logger.warning("Cannot find model layers for hidden state capture")
-            return
+    def register(
+        self,
+        layers: torch.nn.ModuleList,
+        embed_tokens: torch.nn.Module,
+        layer_indices: list[int],
+    ) -> None:
+        """Register forward hooks on the given decoder layers.
 
+        Args:
+            layers: The decoder layer list (e.g. ``model.thinker.model.layers``).
+            embed_tokens: The embedding module (e.g. ``model.thinker.model.embed_tokens``).
+            layer_indices: Layer indices to capture. ``-1`` means embed_tokens.
+        """
         for idx in layer_indices:
             if idx == -1:
-                embed_module = _get_embed_tokens(model)
-                if embed_module is not None:
-                    handle = embed_module.register_forward_hook(self._make_hook(idx))
-                    self._handles.append(handle)
-                else:
-                    logger.warning("Cannot find embed_tokens for embedding capture")
-                continue
-            if idx >= len(layers):
-                logger.warning(
-                    "Layer index %d out of range (model has %d layers)",
-                    idx,
-                    len(layers),
-                )
-                continue
-            handle = layers[idx].register_forward_hook(self._make_hook(idx))
+                handle = embed_tokens.register_forward_hook(self._make_hook(idx))
+            else:
+                assert idx < len(
+                    layers
+                ), f"Layer index {idx} out of range (model has {len(layers)} layers)"
+                handle = layers[idx].register_forward_hook(self._make_hook(idx))
             self._handles.append(handle)
 
     def _make_hook(self, layer_idx: int):
@@ -456,47 +399,6 @@ class HiddenStateCaptureHook:
         self._handles.clear()
 
 
-def _get_inner_text_model(model: Any) -> Any | None:
-    """Navigate model wrappers to find the inner text model with ``layers``.
-
-    Traversal paths:
-      - model.layers                       (direct)
-      - model.model.layers                 (e.g. LlamaForCausalLM)
-      - model.model.model.layers           (deeper wrappers)
-      - model.thinker.model.layers         (Qwen3OmniMoeForConditionalGeneration)
-    """
-    _candidates = [
-        lambda: model,
-        lambda: model.model,
-        lambda: model.model.model,
-        lambda: model.thinker.model,
-    ]
-    for candidate_fn in _candidates:
-        try:
-            candidate = candidate_fn()
-            _ = candidate.layers
-            return candidate
-        except AttributeError:
-            continue
-    return None
-
-
-def _get_model_layers(model: Any) -> list | None:
-    """Return the decoder layers list, or ``None``."""
-    inner = _get_inner_text_model(model)
-    if inner is None:
-        return None
-    return inner.layers
-
-
-def _get_embed_tokens(model: Any) -> Any | None:
-    """Return the ``embed_tokens`` module, or ``None``."""
-    inner = _get_inner_text_model(model)
-    if inner is None:
-        return None
-    return inner.embed_tokens
-
-
 class SGLangModelRunner:
     """Model runner that uses SGLang's ModelWorker for execution.
 
@@ -510,6 +412,8 @@ class SGLangModelRunner:
         output_processor: SGLangOutputProcessor,
         batch_planner: SGLangBatchPlanner | None = None,
         capture_hidden_layers: list[int] | None = None,
+        decoder_layers: torch.nn.ModuleList | None = None,
+        embed_tokens: torch.nn.Module | None = None,
     ):
         self.model_worker = model_worker
         self.output_processor = output_processor
@@ -517,9 +421,15 @@ class SGLangModelRunner:
         self._hidden_hook: HiddenStateCaptureHook | None = None
 
         if capture_hidden_layers:
+            assert (
+                decoder_layers is not None
+            ), "decoder_layers must be provided when capture_hidden_layers is set"
+            assert (
+                embed_tokens is not None
+            ), "embed_tokens must be provided when capture_hidden_layers is set"
             self._hidden_hook = HiddenStateCaptureHook()
             self._hidden_hook.register(
-                model_worker.model_runner.model, capture_hidden_layers
+                decoder_layers, embed_tokens, capture_hidden_layers
             )
 
     def execute(self, scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
