@@ -76,10 +76,7 @@ def create_encoder_engine(
         await engine.add_request("req-1", data)
         result = await engine.get_result("req-1")  # Returns embeddings tensor
     """
-    # Get pad_token_id from tokenizer if available
-    pad_token_id = 0
-    if tokenizer is not None:
-        pad_token_id = getattr(tokenizer, "pad_token_id", None) or 0
+    pad_token_id = tokenizer.pad_token_id if tokenizer is not None else 0
 
     scheduler = Scheduler(
         batch_planner=EncoderBatchPlanner(max_batch_size=max_batch_size),
@@ -144,10 +141,7 @@ def create_ar_engine(
 
         generated_text = tokenizer.decode(result.output_ids)
     """
-    # Get eos_token_id from tokenizer
-    eos_token_id = 2
-    if tokenizer is not None:
-        eos_token_id = getattr(tokenizer, "eos_token_id", None) or 2
+    eos_token_id = tokenizer.eos_token_id if tokenizer is not None else 2
 
     def _stream_adapter(request, output):
         token = output.data
@@ -397,7 +391,7 @@ class TalkerCodecRunner:
         return input_embeds
 
     def _run_backbone(self, input_embeds: torch.Tensor) -> torch.Tensor:
-        """Run talker backbone forward. Returns [1, seq, hidden]."""
+        """Run talker backbone forward."""
         seq_len = input_embeds.shape[1]
         flat_embeds = input_embeds.squeeze(0)
         positions = torch.arange(seq_len, device=self.device)
@@ -412,13 +406,8 @@ class TalkerCodecRunner:
         return hidden_states.unsqueeze(0)
 
 
-# ---------------------------------------------------------------------------
-# Simple batch planner (single request, no batching)
-# ---------------------------------------------------------------------------
-
-
 class _SingleRequestBatchPlanner:
-    """Selects one request per step. Running requests take priority."""
+    """Selects one request per step."""
 
     def select_requests(
         self,
@@ -440,18 +429,8 @@ class _SingleRequestBatchPlanner:
         return None
 
 
-# ---------------------------------------------------------------------------
-# SDPA attention patch (replaces RadixAttention in talker backbone)
-# ---------------------------------------------------------------------------
-
-
 class _SDPAWrapper(torch.nn.Module):
-    """Drop-in replacement for RadixAttention using scaled dot-product attention.
-
-    RadixAttention requires paged KV cache infrastructure. For the talker
-    backbone which does a single full-sequence forward pass, standard SDPA
-    with a causal mask is sufficient.
-    """
+    """Drop-in replacement for RadixAttention using scaled dot-product attention."""
 
     def __init__(self, num_heads: int, num_kv_heads: int, head_dim: int) -> None:
         super().__init__()
@@ -490,10 +469,7 @@ class _SDPAWrapper(torch.nn.Module):
 
 
 def patch_talker_attention(talker_model: "Qwen3OmniTalker") -> None:
-    """Replace RadixAttention in the talker backbone with SDPA wrappers.
-
-    Also fixes RotaryEmbedding cos_sin_cache dtype for the CUDA RoPE kernel.
-    """
+    """Replace RadixAttention in the talker backbone with SDPA wrappers."""
     text_model = talker_model.model
     for layer in text_model.layers:
         attn_mod = layer.self_attn
@@ -504,21 +480,14 @@ def patch_talker_attention(talker_model: "Qwen3OmniTalker") -> None:
         )
         attn_mod.attn = sdpa
 
-        rotary = getattr(attn_mod, "rotary_emb", None)
-        if rotary is not None:
-            cache = getattr(rotary, "cos_sin_cache", None)
-            if cache is not None and cache.dtype != torch.float32:
-                rotary.cos_sin_cache = cache.to(torch.float32)
+        rotary = attn_mod.rotary_emb
+        if rotary.cos_sin_cache.dtype != torch.float32:
+            rotary.cos_sin_cache = rotary.cos_sin_cache.to(torch.float32)
 
         logger.info(
             "Patched talker layer %d attention: RadixAttention → SDPA",
             layer.layer_id,
         )
-
-
-# ---------------------------------------------------------------------------
-# Mock ForwardBatch (for SDPA-patched backbone without ModelWorker)
-# ---------------------------------------------------------------------------
 
 
 class _ExtendForwardMode:
@@ -541,22 +510,6 @@ class _MockForwardBatch:
     and ``LayerCommunicator`` to proceed without crashing.
     """
 
-    _OPTIONAL_NONE_ATTRS: frozenset[str] = frozenset(
-        {
-            "token_to_kv_pool",
-            "nsa_cp_metadata",
-            "extend_prefix_lens",
-            "extend_seq_lens",
-            "extend_logprob_start_lens",
-            "top_logprobs_nums",
-            "return_logprob",
-            "positions",
-            "mrope_positions",
-            "spec_info",
-            "capture_hidden_mode",
-        }
-    )
-
     def __init__(self, seq_len: int, device: torch.device) -> None:
         self.seq_lens = torch.tensor([seq_len], device=device)
         self.req_pool_indices = torch.zeros(1, dtype=torch.long, device=device)
@@ -570,11 +523,17 @@ class _MockForwardBatch:
         self.global_num_tokens_cpu = None
         self.num_token_non_padded = None
         self.can_run_dp_cuda_graph = False
-
-    def __getattr__(self, name: str) -> None:
-        if name in _MockForwardBatch._OPTIONAL_NONE_ATTRS:
-            return None
-        raise AttributeError(f"'_MockForwardBatch' object has no attribute '{name}'")
+        self.token_to_kv_pool = None
+        self.nsa_cp_metadata = None
+        self.extend_prefix_lens = None
+        self.extend_seq_lens = None
+        self.extend_logprob_start_lens = None
+        self.top_logprobs_nums = None
+        self.return_logprob = None
+        self.positions = None
+        self.mrope_positions = None
+        self.spec_info = None
+        self.capture_hidden_mode = None
 
 
 def _build_mock_forward_batch(seq_len: int, device: torch.device) -> _MockForwardBatch:
