@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import time
+import uuid
 from typing import Any, Callable, Dict, List
 
 import torch
@@ -161,8 +162,38 @@ class GetOperation(NcclOperation):
             self._completed = True
 
 
+class LoopbackPutOperation(RelayOperation):
+    """Immediate-completion put for single-process loopback mode."""
+
+    def __init__(self, metadata: Any):
+        self._metadata = metadata
+
+    @property
+    def metadata(self) -> Any:
+        return self._metadata
+
+    async def wait_for_completion(self, timeout: float = 30.0) -> None:
+        pass
+
+
+class LoopbackGetOperation(RelayOperation):
+    """Immediate-completion get for single-process loopback mode."""
+
+    def __init__(self):
+        pass
+
+    @property
+    def metadata(self) -> Any:
+        return None
+
+    async def wait_for_completion(self, timeout: float = 30.0) -> None:
+        pass
+
+
 @register_relay("nccl")
 class NcclRelay(Relay):
+    _loopback_buffer: Dict[str, torch.Tensor] = {}
+
     def __init__(
         self,
         engine_id: str,
@@ -172,7 +203,7 @@ class NcclRelay(Relay):
         credits: int = 2,
         device: str = "cuda",
         rank: int = None,
-        world_size: int = 2,
+        world_size: int = None,
     ):
         self.engine_id = engine_id
         self.device = device
@@ -186,6 +217,17 @@ class NcclRelay(Relay):
 
         if torch.cuda.is_available():
             torch.cuda.set_device(self.device_id)
+
+        self._loopback = rank is None and world_size is None
+
+        if self._loopback:
+            self.connection = None
+            self.allocator = CreditAllocator(credits=credits)
+            logger.info(
+                f"[{engine_id}] NcclRelay running in loopback mode (single-process). "
+                f"NCCL init skipped."
+            )
+            return
 
         if rank is None:
             rank = int(os.environ.get("RANK", 0))
@@ -238,7 +280,25 @@ class NcclRelay(Relay):
 
     async def put_async(
         self, tensor: torch.Tensor, request_id: str = None, dst_rank: int = None
-    ) -> PutOperation:
+    ) -> RelayOperation:
+        if self._loopback:
+            credit_id = await self.allocator.acquire_async()
+            loopback_key = uuid.uuid4().hex
+            NcclRelay._loopback_buffer[loopback_key] = tensor.clone()
+            self.allocator.release(credit_id)
+            payload = {
+                "engine_id": self.engine_id,
+                "agent_meta": {"rank": 0, "engine_id": self.engine_id},
+                "transfer_info": {
+                    "size": tensor.numel() * tensor.element_size(),
+                    "device_id": self.device_id,
+                    "shape": list(tensor.shape),
+                    "dtype": str(tensor.dtype),
+                    "loopback_key": loopback_key,
+                },
+            }
+            return LoopbackPutOperation(metadata=payload)
+
         if dst_rank is None:
             if len(self.connection.send_ranks) == 1:
                 dst_rank = self.connection.send_ranks[0]
@@ -283,8 +343,14 @@ class NcclRelay(Relay):
         dest_tensor: torch.Tensor,
         request_id: str = None,
         src_rank: int = None,
-    ) -> GetOperation:
+    ) -> RelayOperation:
         """Asynchronously get tensor via NCCL Zero-Copy."""
+        if self._loopback:
+            loopback_key = metadata["transfer_info"]["loopback_key"]
+            src_tensor = NcclRelay._loopback_buffer.pop(loopback_key)
+            dest_tensor.copy_(src_tensor)
+            return LoopbackGetOperation()
+
         remote_engine_id = metadata["engine_id"]
         remote_agent_meta = metadata["agent_meta"]
 
@@ -305,5 +371,7 @@ class NcclRelay(Relay):
         pass
 
     def close(self):
+        if self._loopback:
+            return
         if dist.is_initialized():
             dist.destroy_process_group()

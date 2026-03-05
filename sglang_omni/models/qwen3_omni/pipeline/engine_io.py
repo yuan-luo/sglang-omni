@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -12,7 +13,26 @@ from sglang_omni.models.qwen3_omni.io import PipelineState, TalkerOutput, Thinke
 
 if TYPE_CHECKING:
     from sglang_omni.engines.omni.runtime.sglang_ar import SGLangARRequestData
-    from sglang_omni.engines.omni.runtime.sglang_talker import TalkerARRequestData
+
+
+# ---------------------------------------------------------------------------
+# Talker request data
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TalkerRequestData:
+    """Per-request data for the talker codec generation stage.
+
+    Stores thinker outputs (embeddings + hidden states) and receives codec
+    generation results via ``output_dict``, which is populated by
+    ``SinglePassIterationController`` after the model runner finishes.
+    """
+
+    thinker_embed: torch.Tensor  # [seq_len, thinker_hidden_size]
+    thinker_hidden: torch.Tensor  # [seq_len, thinker_hidden_size]
+    is_multimodal_mask: torch.Tensor | None = None  # [seq_len] bool
+    output_dict: dict[str, Any] | None = None  # Populated by engine
 
 
 def build_encoder_request(
@@ -201,19 +221,16 @@ def apply_thinker_result(
 # ---------------------------------------------------------------------------
 
 
-def build_sglang_talker_request(
+def build_talker_request(
     state: PipelineState,
     *,
     params: dict[str, Any],
-    request_id: str | None = None,
-) -> "TalkerARRequestData":
-    """Build TalkerARRequestData from pipeline state.
+) -> TalkerRequestData:
+    """Build TalkerRequestData from pipeline state.
 
     Extracts thinker hidden states from talker_inputs and wraps them
-    into a TalkerARRequestData for the talker engine.
+    into a TalkerRequestData for the talker codec engine.
     """
-    from sglang_omni.engines.omni.runtime.sglang_talker import TalkerARRequestData
-
     talker_inputs = state.talker_inputs
     if not talker_inputs:
         raise ValueError("talker_inputs missing on PipelineState")
@@ -227,14 +244,10 @@ def build_sglang_talker_request(
     if not isinstance(thinker_hidden, torch.Tensor):
         raise TypeError("talker_inputs.thinker_hidden must be a torch.Tensor")
 
-    max_new_tokens = params.get("talker_max_new_tokens", thinker_embed.shape[-2])
-
-    return TalkerARRequestData(
+    return TalkerRequestData(
         thinker_embed=thinker_embed,
         thinker_hidden=thinker_hidden,
         is_multimodal_mask=is_multimodal_mask,
-        max_new_tokens=max_new_tokens,
-        request_id=request_id or "talker-req-0",
     )
 
 
@@ -245,10 +258,9 @@ def apply_talker_result(
     result: Any,
 ) -> TalkerOutput:
     """Store talker output (codec codes) on pipeline state."""
-    from sglang_omni.engines.omni.runtime.sglang_talker import TalkerARRequestData
-
-    if isinstance(result, TalkerARRequestData):
-        codec_codes = result.codec_codes
+    if isinstance(result, TalkerRequestData):
+        codec_dict = result.output_dict or {}
+        codec_codes = codec_dict.get("codec_codes")
         if hasattr(codec_codes, "tolist"):
             codec_codes = codec_codes.tolist()
         talker_out: TalkerOutput = {

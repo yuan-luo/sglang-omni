@@ -13,7 +13,6 @@ from sglang_omni.engines.omni import (
     create_ar_engine,
     create_encoder_engine,
     create_sglang_ar_engine,
-    create_sglang_talker_engine,
 )
 from sglang_omni.executors import EngineExecutor, PreprocessingExecutor
 from sglang_omni.models.qwen3_omni.components.audio_encoder import Qwen3OmniAudioEncoder
@@ -26,8 +25,8 @@ from sglang_omni.models.qwen3_omni.pipeline.engine_io import (
     apply_talker_result,
     apply_thinker_result,
     build_encoder_request,
-    build_sglang_talker_request,
     build_sglang_thinker_request,
+    build_talker_request,
     build_thinker_request,
 )
 from sglang_omni.models.qwen3_omni.pipeline.merge import (
@@ -351,18 +350,14 @@ def create_sglang_thinker_executor_from_config(
 def create_sglang_talker_executor(
     talker_model: Any,
     *,
-    model_worker: Any | None = None,
     gpu_id: int = 0,
 ) -> EngineExecutor:
     """Create a talker executor backed by the Qwen3OmniTalker model."""
+    from sglang_omni.engines.omni.factory import create_talker_codec_engine
 
     def _request_builder(payload: StagePayload):
         state = load_state(payload)
-        return build_sglang_talker_request(
-            state,
-            params=payload.request.params,
-            request_id=payload.request_id,
-        )
+        return build_talker_request(state, params=payload.request.params)
 
     def _result_builder(payload: StagePayload, result: Any) -> StagePayload:
         state = load_state(payload)
@@ -392,11 +387,7 @@ def create_sglang_talker_executor(
             "stage": TALKER_STAGE,
         }
 
-    engine = create_sglang_talker_engine(
-        talker_model=talker_model,
-        model_worker=model_worker,
-        gpu_id=gpu_id,
-    )
+    engine = create_talker_codec_engine(talker_model=talker_model, gpu_id=gpu_id)
 
     return EngineExecutor(
         engine=engine,
@@ -418,7 +409,7 @@ def create_sglang_talker_executor_from_config(
     Loads the Qwen3OmniTalker model and patches RadixAttention with SDPA
     so it can run without a full SGLang ModelWorker.
     """
-    from sglang_omni.engines.omni.runtime.sglang_talker import patch_talker_attention
+    from sglang_omni.engines.omni.factory import patch_talker_attention
     from sglang_omni.models.qwen3_omni.talker import Qwen3OmniTalker
 
     talker_config = _load_talker_config(model_path)
@@ -428,14 +419,9 @@ def create_sglang_talker_executor_from_config(
     talker_model.load_weights(checkpoint_weights)
     talker_model = talker_model.to(device=f"cuda:{gpu_id}", dtype=torch.bfloat16).eval()
 
-    # Patch RadixAttention → SDPA so the backbone works without ModelWorker
     patch_talker_attention(talker_model)
 
-    return create_sglang_talker_executor(
-        talker_model=talker_model,
-        model_worker=None,
-        gpu_id=gpu_id,
-    )
+    return create_sglang_talker_executor(talker_model=talker_model, gpu_id=gpu_id)
 
 
 def _load_talker_config(model_path: str) -> Any:

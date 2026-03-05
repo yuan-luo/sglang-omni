@@ -6,7 +6,7 @@ from .factory import (
     create_ar_engine,
     create_encoder_engine,
     create_sglang_ar_engine,
-    create_sglang_talker_engine,
+    create_talker_codec_engine,
 )
 from .model_runner import ModelRunner
 from .runtime.ar import ARRequestData
@@ -41,14 +41,12 @@ __all__ = [
     "SGLangARRequestData",
     "create_sglang_ar_engine",
     # Talker
-    "TalkerARRequestData",
-    "create_sglang_talker_engine",
+    "create_talker_codec_engine",
 ]
 
 
 _LAZY_EXPORTS = {
     "SGLangARRequestData": ".runtime.sglang_ar",
-    "TalkerARRequestData": ".runtime.sglang_talker",
 }
 
 
