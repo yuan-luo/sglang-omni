@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pipeline configuration factory for the FishAudio S2-Pro TTS pipeline.
 
-Same 3-stage architecture as S1, but defaults to the S2-Pro checkpoint
-and uses ``fishaudio_s1`` stage executors (the DualAR runtime is shared).
+Uses ``FishQwen3OmniForCausalLM`` with the ``qwen3.py`` inference module,
+which is a completely different architecture from S1's ``DualARTransformer``.
+All three stages use S2-Pro-specific executors.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ def create_tts_pipeline_config(
     max_new_tokens: int = 2048,
     max_seq_len: int = 4096,
     use_compile: bool = True,
-    use_radix_cache: bool = True,
+    use_radix_cache: bool = False,
     relay_type: str = "shm",
     fused_stages: list[list[str]] | None = None,
 ) -> PipelineConfig:
@@ -34,11 +35,11 @@ def create_tts_pipeline_config(
     Stages::
 
         preprocessing (CPU)  →  tts_engine (GPU)  →  vocoder (GPU)
-           tokenize text         DualAR decode        DAC codec decode
-           encode ref audio      VQ code generation    VQ codes → audio
+           build Qwen3 prompt    FishQwen3Omni gen    VQGAN decode
+           encode ref audio      semantic + codebook   VQ codes → audio
 
-    Uses the same stage executors as S1 (``fishaudio_s1.pipeline.stages``),
-    since the model architecture (DualAR) is identical.
+    Uses ``FishQwen3OmniForCausalLM`` (loaded via ``AutoModel.from_pretrained``)
+    with the ``qwen3.generate`` function for the TTS engine stage.
 
     Args:
         model_id: HF model ID or local checkpoint path.
@@ -47,7 +48,7 @@ def create_tts_pipeline_config(
         max_new_tokens: Maximum decode steps for the TTS engine.
         max_seq_len: Maximum sequence length for KV cache allocation.
         use_compile: Enable torch.compile for decode steps.
-        use_radix_cache: Enable radix-tree prefix cache for voice ref reuse.
+        use_radix_cache: Not yet supported for S2-Pro.
         relay_type: Tensor relay backend (``"shm"``, ``"nccl"``, ``"nixl"``).
         fused_stages: Optional stage fusion groups.
 
@@ -55,7 +56,6 @@ def create_tts_pipeline_config(
         A :class:`PipelineConfig` ready for ``compile_pipeline()``.
     """
 
-    _s1_pkg = "sglang_omni.models.fishaudio_s1.pipeline"
     _s2_pkg = "sglang_omni.models.fishaudio_s2_pro.pipeline"
 
     def _relay(device: str) -> RelayConfig:
@@ -70,7 +70,7 @@ def create_tts_pipeline_config(
             StageConfig(
                 name=PREPROCESSING_STAGE,
                 executor=ExecutorConfig(
-                    factory=f"{_s1_pkg}.stages.create_preprocessing_executor",
+                    factory=f"{_s2_pkg}.stages.create_preprocessing_executor",
                     args={"model_id": model_id},
                 ),
                 get_next=f"{_s2_pkg}.next_stage.preprocessing_next",
@@ -79,14 +79,13 @@ def create_tts_pipeline_config(
             StageConfig(
                 name=TTS_ENGINE_STAGE,
                 executor=ExecutorConfig(
-                    factory=f"{_s1_pkg}.stages.create_tts_engine_executor",
+                    factory=f"{_s2_pkg}.stages.create_tts_engine_executor",
                     args={
                         "model_id": model_id,
                         "device": tts_device,
                         "max_new_tokens": max_new_tokens,
                         "max_seq_len": max_seq_len,
                         "use_compile": use_compile,
-                        "use_radix_cache": use_radix_cache,
                     },
                 ),
                 get_next=f"{_s2_pkg}.next_stage.tts_engine_next",
@@ -95,7 +94,7 @@ def create_tts_pipeline_config(
             StageConfig(
                 name=VOCODER_STAGE,
                 executor=ExecutorConfig(
-                    factory=f"{_s1_pkg}.stages.create_vocoder_executor",
+                    factory=f"{_s2_pkg}.stages.create_vocoder_executor",
                     args={
                         "model_id": model_id,
                         "device": vocoder_device,
