@@ -285,13 +285,14 @@ class SGLangOutputProcessor:
         return outputs
 
 
+HIDDEN_LAYER_KEY_MAP: dict[int, str] = {
+    -1: "thinker_embed",
+    24: "thinker_hidden",
+}
+
+
 class SGLangIterationController:
     """Handles per-request state updates with chunked prefill semantics."""
-
-    HIDDEN_LAYER_KEY_MAP: dict[int, str] = {
-        -1: "thinker_embed",
-        24: "thinker_hidden",
-    }
 
     def __init__(self, tree_cache: Any) -> None:
         self.tree_cache = tree_cache
@@ -329,7 +330,7 @@ class SGLangIterationController:
         if not data.hidden_states_buffer:
             return
         for layer_idx, chunks in data.hidden_states_buffer.items():
-            key = self.HIDDEN_LAYER_KEY_MAP.get(layer_idx, f"hidden_layer_{layer_idx}")
+            key = HIDDEN_LAYER_KEY_MAP.get(layer_idx, f"hidden_layer_{layer_idx}")
             if chunks:
                 data.extra_model_outputs[key] = torch.cat(chunks, dim=0)
         data.hidden_states_buffer.clear()

@@ -266,10 +266,7 @@ def create_sglang_ar_engine(
         iteration_controller=iteration_ctrl,
         stream_adapter=_stream_adapter,
     )
-    # Resolve decoder layers and embed_tokens for hidden state capture.
-    # The model structure depends on the architecture (e.g. model.thinker.model
-    # for Qwen3-Omni, model.model for Llama). The caller that knows the model
-    # architecture is responsible for passing the right sub-modules.
+
     decoder_layers = None
     embed_tokens = None
     if capture_hidden_layers:
@@ -318,21 +315,18 @@ def create_talker_codec_engine(
     return OmniEngine(scheduler=scheduler, model_runner=codec_runner)
 
 
-# ---------------------------------------------------------------------------
-# Talker codec runner
-# ---------------------------------------------------------------------------
-
-
 class TalkerCodecRunner:
     """Model runner that generates multi-layer RVQ codec codes.
 
     Pipeline:
       1. Project thinker outputs to talker hidden dim
-      2. Forward through talker MoE backbone (single pass)
-      3. Layer-0 codes via argmax on codec head logits
+      2. Forward through talker backbone (single pass)
+      3. Layer-0 codes via argmax on logits
       4. Layers 1-15 via code predictor
 
-    Only the SDPA-patched backbone path is supported (no ModelWorker).
+    Note (chenyang): TalkerCodecRunner does not use SGLang ModelWorker,
+    since talker runs a single full-sequence forward, no KV cache needed,
+    variable input sequence lengths hurts CUDA graph, and so on.
     """
 
     def __init__(
