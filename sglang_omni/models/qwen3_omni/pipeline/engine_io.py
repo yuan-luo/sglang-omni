@@ -231,9 +231,10 @@ def build_sglang_thinker_request(
             mm_inputs.mrope_position_delta = mrope_position_delta
             req.multimodal_inputs = mm_inputs
 
-    # Attach model_inputs to Req for image embedding merge in SGLangModelRunner
-    if model_inputs:
-        req.omni_model_inputs = model_inputs
+    # Attach model_inputs to Req for image embedding merge in SGLangModelRunner.
+    # Always initialize both attributes so downstream code can access directly.
+    req.omni_model_inputs = model_inputs if model_inputs else None
+    req._omni_consumed = None
 
     # Build SGLangARRequestData — output_ids points to req.output_ids
     data = SGLangARRequestData(
