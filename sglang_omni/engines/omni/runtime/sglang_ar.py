@@ -79,10 +79,7 @@ class SGLangBatchPlanner:
                 self.req_id_map[data.req.rid] = sched_req
 
         running_batch = self.decode_manager.running_batch
-        if hasattr(running_batch, "batch_size"):
-            running_bs = running_batch.batch_size()
-        else:
-            running_bs = len(getattr(running_batch, "reqs", []))
+        running_bs = running_batch.batch_size()
         num_allocatable_reqs = max(
             self.server_args.max_running_requests - running_bs, 0
         )
@@ -90,7 +87,6 @@ class SGLangBatchPlanner:
         running_batch_for_prefill = self.decode_manager.running_batch
         if (
             running_batch_for_prefill is not None
-            and hasattr(running_batch_for_prefill, "is_empty")
             and running_batch_for_prefill.is_empty()
         ):
             running_batch_for_prefill = None
@@ -146,7 +142,7 @@ class SGLangBatchPlanner:
             self.prefill_manager.tree_cache.cache_unfinished_req(
                 active_chunked_req, chunked=True
             )
-            if getattr(active_chunked_req, "req_pool_idx", None) is not None:
+            if active_chunked_req.req_pool_idx is not None:
                 self.prefill_manager.req_to_token_pool.free(
                     active_chunked_req.req_pool_idx
                 )
@@ -313,7 +309,7 @@ class SGLangIterationController:
         if token_id is not None:
             req.output_ids.append(token_id)
             req.check_finished()
-            if not req.finished() and getattr(req, "decode_batch_idx", 0) == 0:
+            if not req.finished() and req.decode_batch_idx == 0:
                 self.tree_cache.cache_unfinished_req(req)
 
     def is_finished(self, request: SchedulerRequest, output: RequestOutput) -> bool:
