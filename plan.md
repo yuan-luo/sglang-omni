@@ -197,6 +197,60 @@ if req.omni_model_inputs is not None:
     req.omni_model_inputs = None
 ```
 
+### Step 6: Remove custom forward bypass — use SGLang's standard `forward_extend` path
+
+**Problem with current implementation (`change.md`):**
+
+The current code introduces `_forward_with_omni_embeds()` which bypasses SGLang's
+`forward_extend()` and calls the inner language model directly. This was based on the
+incorrect assumption that setting `forward_batch.input_embeds` would pass `input_embeds`
+to the **outer** `Qwen3VLForConditionalGeneration.forward()` which doesn't accept it.
+
+**Why this is wrong:**
+
+The SGLang-registered model (`EntryClass` at `thinker.py:820`) is
+`Qwen3OmniMoeThinkerTextModel` — the **inner language model**, not the outer wrapper.
+Its `forward()` signature (line 632) already accepts `input_embeds`:
+
+```python
+def forward(self, input_ids, positions, forward_batch, input_embeds=None, ...)
+```
+
+SGLang's `ModelRunner.forward_extend()` does:
+```python
+if forward_batch.input_embeds is not None:
+    kwargs["input_embeds"] = forward_batch.input_embeds.bfloat16()
+return self.model.forward(input_ids, positions, forward_batch, **kwargs)
+```
+
+Since `self.model` IS `Qwen3OmniMoeThinkerTextModel`, the `input_embeds` kwarg is
+received correctly. There is no outer wrapper in the SGLang path.
+
+**Performance impact of the current bypass:**
+
+- `can_run_cuda_graph=False` — disables CUDA graph for all multimodal prefills
+- Skips `piecewise_cuda_graph_runner.can_run()` check and `replay()` path
+- Skips potential `torch.compile` optimizations
+- Manually reimplements `attn_backend.init_forward_metadata()` and logits processing
+
+**Fix:**
+
+1. In `_inject_multimodal_embeds()`, set `forward_batch.input_embeds = input_embeds`
+   instead of `forward_batch.omni_input_embeds`.
+2. Delete `_forward_with_omni_embeds()` entirely.
+3. In `execute()`, remove the `has_omni_embeds` branching — always use
+   `self.model_worker.forward_batch_generation(forward_batch)`.
+4. In `Qwen3OmniMoeThinkerTextModel.forward()`, the `input_embeds` kwarg is already
+   handled natively — remove the `omni_input_embeds` fallback from `forward_batch`.
+5. Keep deepstack data on `forward_batch` as custom attributes (read by the model).
+
+**File changes:**
+
+| File | Change |
+|------|--------|
+| `sglang_omni/engines/omni/runtime/sglang_ar.py` | Remove `_forward_with_omni_embeds()`, simplify `execute()`, change `omni_input_embeds` → `input_embeds` |
+| `sglang_omni/models/qwen3_omni/thinker.py` | Remove `omni_input_embeds` fallback from `forward()` |
+
 ## Implementation Order
 
 1. **Step 3 first** (M-RoPE positions) - Compute and attach `mrope_positions` to the
@@ -209,3 +263,7 @@ if req.omni_model_inputs is not None:
    for full correctness of the Qwen3-Omni deepstack mechanism.
 
 4. **Step 5** (Cleanup) - Memory optimization.
+
+5. **Step 6** (Remove custom forward bypass) - Use SGLang's standard `forward_extend`
+   path instead of the custom `_forward_with_omni_embeds()`. This re-enables CUDA graph
+   for multimodal prefills and removes unnecessary code.

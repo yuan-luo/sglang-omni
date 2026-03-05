@@ -69,6 +69,73 @@ data paths were broken:
 - Modified `_deepstack_process()`: handles both 1D boolean masks (SGLang path) and
   multi-dim masks (HF path).
 
+## Why `_forward_with_omni_embeds()` bypass is necessary
+
+### What we tried
+
+We attempted to eliminate the custom `_forward_with_omni_embeds()` bypass (plan.md Step 6)
+by using SGLang's standard `forward_extend` path:
+
+1. Changed `forward_batch.omni_input_embeds = input_embeds` → `forward_batch.input_embeds = input_embeds`
+2. Deleted `_forward_with_omni_embeds()` entirely
+3. Removed the `has_omni_embeds` branching in `execute()` — always used
+   `self.model_worker.forward_batch_generation(forward_batch)`
+4. Removed the `omni_input_embeds` fallback in `Qwen3OmniMoeThinkerTextModel.forward()`
+
+The rationale was that SGLang's `forward_extend()` already handles `forward_batch.input_embeds`:
+```python
+if forward_batch.input_embeds is not None:
+    kwargs["input_embeds"] = forward_batch.input_embeds.bfloat16()
+return self.model.forward(input_ids, positions, forward_batch, **kwargs)
+```
+
+And `plan.md` claimed `self.model` IS `Qwen3OmniMoeThinkerTextModel` (the inner language
+model, `EntryClass` at `thinker.py:820`), which accepts `input_embeds` in its `forward()`.
+
+### Why it failed
+
+At runtime, `self.model` is **NOT** `Qwen3OmniMoeThinkerTextModel`. It is
+`Qwen3VLForConditionalGeneration` — SGLang's built-in outer wrapper model.
+
+The `EntryClass = Qwen3OmniMoeThinkerTextModel` in `thinker.py` is used by our custom
+pipeline config registry (`sglang_omni/models/registry.py`), **not** by SGLang's model
+loading. SGLang resolves the model class from the HuggingFace config's `architectures`
+field via its own model registry (`sglang.srt.models.registry.ModelRegistry`).
+
+Verified at runtime:
+```
+ModelRegistry.models["Qwen3VLForConditionalGeneration"]
+  → sglang.srt.models.qwen3_vl.Qwen3VLForConditionalGeneration
+```
+
+`Qwen3VLForConditionalGeneration.forward()` does NOT accept `input_embeds` as a keyword
+argument, so SGLang's `forward_extend()` fails with:
+```
+TypeError: Qwen3VLForConditionalGeneration.forward() got an unexpected keyword argument 'input_embeds'
+```
+
+### Why the bypass must stay
+
+The custom `_forward_with_omni_embeds()` navigates past the outer wrapper to call the inner
+language model directly (`outer.model`), which does accept `input_embeds`. This is the only
+way to inject pre-merged multimodal embeddings without modifying SGLang's built-in model
+classes or re-registering a different model class in SGLang's registry.
+
+To properly eliminate the bypass in the future, we would need to either:
+- Register `Qwen3OmniMoeThinkerTextModel` as the SGLang model class (requires overriding
+  SGLang's model registry resolution for this architecture), or
+- Modify `Qwen3VLForConditionalGeneration.forward()` upstream to accept `input_embeds`
+
+### Trade-offs of the current bypass
+
+- `can_run_cuda_graph=False` — disables CUDA graph for multimodal prefills
+- Skips `piecewise_cuda_graph_runner.can_run()` / `replay()` path
+- Skips potential `torch.compile` optimizations
+- Manually reimplements `attn_backend.init_forward_metadata()` and logits processing
+
+These are acceptable since multimodal prefills are a small fraction of total forward passes
+(only the first step per request), and decode steps use the standard path with CUDA graph.
+
 ## Known Limitations
 
 - **Deepstack not yet supported in SGLang path**: the per-layer visual feature injection

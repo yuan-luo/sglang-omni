@@ -559,8 +559,9 @@ class SGLangModelRunner:
 
         # Store on a custom attribute — NOT forward_batch.input_embeds, because
         # that triggers SGLang's forward_extend to pass input_embeds as a kwarg
-        # to model.forward(), which the upstream Qwen3VL model doesn't accept.
-        # The inner Qwen3OmniMoeThinkerTextModel reads this in its forward().
+        # to model.forward(). The SGLang-loaded model is Qwen3VLForConditionalGeneration
+        # (the outer wrapper) which doesn't accept input_embeds. We bypass it
+        # via _forward_with_omni_embeds() which calls the inner language model directly.
         forward_batch.omni_input_embeds = input_embeds
 
         # Attach deepstack data to forward_batch for the model to use
@@ -608,8 +609,7 @@ class SGLangModelRunner:
         model = model_runner.model
 
         # Navigate to the inner components
-        # Qwen3OmniMoeForConditionalGeneration.thinker (Qwen3OmniMoeThinkerForConditionalGeneration)
-        #   extends Qwen3VLForConditionalGeneration which has .model, .lm_head, .logits_processor
+        # Qwen3VLForConditionalGeneration has .model (language model), .lm_head, .logits_processor
         outer = model
         if hasattr(model, "thinker"):
             outer = model.thinker
@@ -629,8 +629,6 @@ class SGLangModelRunner:
         input_embeds = forward_batch.omni_input_embeds
 
         # Call inner language model directly with input_embeds
-        # NOTE: deepstack is skipped for now — it requires matching the extend
-        # chunk's visual token subset, which needs additional offset tracking.
         hidden_states = language_model(
             input_ids=None,
             positions=positions,
@@ -677,9 +675,9 @@ class SGLangModelRunner:
 
         # 3. Forward pass
         if has_omni_embeds:
-            # Custom forward: the upstream Qwen3VLForConditionalGeneration.forward()
-            # doesn't accept input_embeds kwarg. We bypass it and call the inner
-            # language model directly with our pre-merged embeddings.
+            # Custom forward: Qwen3VLForConditionalGeneration.forward() doesn't
+            # accept input_embeds kwarg. We bypass it and call the inner language
+            # model directly with our pre-merged embeddings.
             batch_result = self._forward_with_omni_embeds(forward_batch)
         else:
             batch_result = self.model_worker.forward_batch_generation(forward_batch)
