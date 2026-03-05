@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 from sgl_kernel import fused_qk_norm_rope
+from sglang.srt.server_args import get_global_server_args
 from torch import nn
 from transformers import PretrainedConfig
 
@@ -41,7 +42,6 @@ from sglang_omni.vendor.sglang.models import (
     create_fused_set_kv_buffer_arg,
     enable_fused_set_kv_buffer,
 )
-from sglang_omni.vendor.sglang.server_args import get_global_server_args
 from sglang_omni.vendor.sglang.utils import make_layers
 
 logger = logging.getLogger(__name__)
