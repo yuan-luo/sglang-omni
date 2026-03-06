@@ -107,6 +107,8 @@ class Scheduler:
             # If already finished or aborted, resolve immediately.
             request = self.requests[request_id]
             if request.status in (SchedulerStatus.FINISHED, SchedulerStatus.ABORTED):
+                if request.error is not None:
+                    raise request.error
                 return request
 
             # Create future lazily, and recover from stale canceled futures.
@@ -230,6 +232,7 @@ class Scheduler:
         """Clean up finished request."""
         was_running = request.status == SchedulerStatus.RUNNING
         request.status = status
+        request.error = error
         request.finish_time = time.time()
 
         if was_running:
