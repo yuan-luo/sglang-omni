@@ -131,14 +131,27 @@ def server_process():
 # ---------------------------------------------------------------------------
 
 
-def test_video_text_airport(server_process):
-    """Send video + 'Where am I right now?' and expect airport-related answer."""
-    proc, startup_time = server_process
+def test_two_round_conversation(server_process):
+    """Two-round video conversation: location question then school question.
 
+    Round 1: video + "Where am I right now?" -> expects transit hub keywords
+    Round 2: follow-up "Is there a specific school shown in the video?" -> expects "UCI"
+
+    Also measures per-round latency to check whether the second round benefits
+    from KV cache reuse (it should be significantly faster if prefix caching works).
+    """
+    proc, startup_time = server_process
     video_abs = os.path.abspath(VIDEO_PATH)
-    payload = {
+
+    # ------------------------------------------------------------------
+    # Round 1: location question
+    # ------------------------------------------------------------------
+    round1_messages = [
+        {"role": "user", "content": "Where am I right now?"},
+    ]
+    payload_r1 = {
         "model": "qwen3-omni",
-        "messages": [{"role": "user", "content": "Where am I right now?"}],
+        "messages": round1_messages,
         "videos": [video_abs],
         "modalities": ["text"],
         "max_tokens": 256,
@@ -146,40 +159,95 @@ def test_video_text_airport(server_process):
         "stream": False,
     }
 
-    t_req_start = time.monotonic()
-    resp = requests.post(
+    t1_start = time.monotonic()
+    resp_r1 = requests.post(
         f"{API_BASE}/v1/chat/completions",
-        json=payload,
+        json=payload_r1,
         timeout=REQUEST_TIMEOUT,
     )
-    e2e_latency = time.monotonic() - t_req_start
+    t1_elapsed = time.monotonic() - t1_start
 
     assert (
-        resp.status_code == 200
-    ), f"Request failed with status {resp.status_code}: {resp.text}"
+        resp_r1.status_code == 200
+    ), f"Round 1 failed with status {resp_r1.status_code}: {resp_r1.text}"
 
-    body = resp.json()
-    content = body["choices"][0]["message"].get("content", "")
-    print(f"\n[PERF] E2E latency: {e2e_latency:.1f}s")
-    print(f"[PERF] Server startup: {startup_time:.1f}s")
-    print(f"[RESPONSE] {content}")
+    body_r1 = resp_r1.json()
+    content_r1 = body_r1["choices"][0]["message"].get("content", "")
 
-    # Check the model recognized the airport
-    content_lower = content.lower()
-    matched = [kw for kw in EXPECTED_KEYWORDS if kw in content_lower]
-    assert matched, (
-        f"Response does not mention airport-related keywords.\n"
+    print(f"\n{'='*60}")
+    print(f"[PERF] Server startup : {startup_time:.1f}s")
+    print(f"[PERF] Round 1 latency: {t1_elapsed:.1f}s")
+    print(f"[R1 RESPONSE] {content_r1}")
+
+    content_r1_lower = content_r1.lower()
+    matched_r1 = [kw for kw in EXPECTED_KEYWORDS if kw in content_r1_lower]
+    assert matched_r1, (
+        f"Round 1: response does not mention expected keywords.\n"
         f"Keywords checked: {EXPECTED_KEYWORDS}\n"
-        f"Response: {content}"
+        f"Response: {content_r1}"
     )
 
-    # Verify server is still healthy after the request
+    # ------------------------------------------------------------------
+    # Round 2: follow-up about the school (multi-turn with context)
+    # ------------------------------------------------------------------
+    round2_messages = [
+        {"role": "user", "content": "Where am I right now?"},
+        {"role": "assistant", "content": content_r1},
+        {"role": "user", "content": "Is there a specific school shown in the video?"},
+    ]
+    payload_r2 = {
+        "model": "qwen3-omni",
+        "messages": round2_messages,
+        "videos": [video_abs],
+        "modalities": ["text"],
+        "max_tokens": 256,
+        "temperature": 0.0,
+        "stream": False,
+    }
+
+    t2_start = time.monotonic()
+    resp_r2 = requests.post(
+        f"{API_BASE}/v1/chat/completions",
+        json=payload_r2,
+        timeout=REQUEST_TIMEOUT,
+    )
+    t2_elapsed = time.monotonic() - t2_start
+
+    assert (
+        resp_r2.status_code == 200
+    ), f"Round 2 failed with status {resp_r2.status_code}: {resp_r2.text}"
+
+    body_r2 = resp_r2.json()
+    content_r2 = body_r2["choices"][0]["message"].get("content", "")
+
+    print(f"[PERF] Round 2 latency: {t2_elapsed:.1f}s")
+    print(f"[R2 RESPONSE] {content_r2}")
+    print(f"{'='*60}")
+
+    # Round 2 should mention UCI
+    content_r2_lower = content_r2.lower()
+    assert "uci" in content_r2_lower, (
+        f"Round 2: response does not mention 'UCI'.\n" f"Response: {content_r2}"
+    )
+
+    # ------------------------------------------------------------------
+    # Performance comparison
+    # ------------------------------------------------------------------
+    speedup = t1_elapsed / t2_elapsed if t2_elapsed > 0 else float("inf")
+    print(f"\n[PERF] Round 1 / Round 2 speedup: {speedup:.2f}x")
+    if t2_elapsed >= t1_elapsed * 0.8:
+        print(
+            "[WARN] Round 2 is NOT significantly faster than Round 1. "
+            "KV cache / prefix caching may not be effective."
+        )
+
+    # Server should still be healthy
     health = requests.get(f"{API_BASE}/health", timeout=5)
-    assert health.status_code == 200, "Server unhealthy after request"
+    assert health.status_code == 200, "Server unhealthy after round 2"
 
 
 def test_server_stability_after_request(server_process):
-    """Verify the server process is still alive after the video request."""
+    """Verify the server process is still alive after the conversation."""
     proc, _ = server_process
     assert (
         proc.poll() is None

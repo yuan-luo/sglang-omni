@@ -218,7 +218,106 @@ End-to-end test that:
 
 ---
 
-## 5. Directions Explored But Not Pursued
+## 5. Second-Round Request Slowness Investigation
+
+### 5.1 The Observation
+
+After adding a two-round conversation test, the results were:
+
+| Metric | Time |
+|--------|------|
+| Server startup | 20.0s |
+| Round 1 (video + "Where am I right now?") | **57.3s** |
+| Round 2 (follow-up "Is there a specific school shown in the video?") | **51.6s** |
+| Speedup | **1.11x** (essentially no improvement) |
+
+Round 2 includes the full round 1 context (user message + assistant response) as conversation history, plus the same video. If KV cache / prefix caching worked, round 2 should only need to prefill the new tokens (the assistant response from round 1 + the new user question), reusing the cached KV states for the shared prefix. This would reduce the thinker prefill from ~2400+ tokens to just ~200 tokens — a dramatic speedup. Instead, round 2 took nearly the same time.
+
+### 5.2 Investigation: Where Does the Pipeline Spend Time in Round 2?
+
+The sglang_omni pipeline treats **each API request as a completely independent pipeline execution**. When round 2 arrives, the full pipeline runs from scratch:
+
+```
+Round 2 API request (multi-turn messages + video path)
+  1. Preprocessing stage: re-tokenizes ALL messages, re-loads video frames  (~0.5s)
+  2. Image encoder stage: re-encodes 9600 video patches through ViT         (~15-25s)
+  3. Audio encoder stage: re-runs                                            (~minimal)
+  4. Aggregate stage: re-merges encoder outputs                              (~minimal)
+  5. Thinker stage: new SGLang Req with full token sequence                  (~25-30s)
+```
+
+This means the image encoder (step 2) re-processes the **exact same video** — 9600 patches through the HF vision transformer — a completely redundant computation consuming a large fraction of the total time.
+
+### 5.3 Investigation: Does SGLang's Tree Cache Help at the Thinker Level?
+
+I traced the SGLang prefix caching mechanism:
+
+1. **Tree cache exists**: `create_tree_cache()` is called in `factory.py` and passed to `PrefillManager`, `SGLangResourceManager`, and `SGLangIterationController`.
+
+2. **KV cache is released after round 1**: When round 1 finishes, `SGLangResourceManager.free()` calls `release_kv_cache(data.req, self.tree_cache)`. This returns the KV cache entries to the tree cache, where they become available for prefix matching.
+
+3. **Prefix matching during round 2 prefill**: When a new `Req` is created for round 2, `PrefillManager.schedule_next_batch()` calls `req.init_next_round_input(tree_cache)`, which calls:
+   ```python
+   match_result = tree_cache.match_prefix(
+       MatchPrefixParams(
+           key=RadixKey(token_ids=token_ids, extra_key=self.extra_key),
+           ...
+       )
+   )
+   ```
+   The tree cache looks for the longest matching token ID prefix in its stored entries.
+
+4. **The critical question: do the token IDs match?**
+
+   Round 1 input_ids: `[system_tokens..., <video>*2400, user_text_tokens...]`
+   Round 2 input_ids: `[system_tokens..., <video>*2400, user_text_tokens..., assistant_response_tokens..., new_user_text_tokens...]`
+
+   The prefix (system + video placeholders + round 1 user text) is identical between the two rounds at the token level. So in theory, the tree cache SHOULD match this prefix and skip recomputing those KV states.
+
+5. **But there's a subtlety with multimodal tokens**: The video placeholder tokens (token ID 151656) are the same in both rounds, but the actual video embeddings that replace them are freshly computed by the image encoder each time. In `_inject_multimodal_embeds`, these embeddings replace the placeholder tokens in `input_embeds`. The tree cache matches token IDs, not embeddings — so it would "match" the prefix even though the embeddings were recomputed.
+
+   This means the tree cache prefix match at the thinker level **could** work for the text tokens. But the video token positions would have their KV values from round 1's embeddings, which should be numerically identical to round 2's (same video, same encoder). So in principle, prefix caching SHOULD provide a benefit for the thinker stage.
+
+### 5.4 Why Prefix Caching Still Doesn't Help Much
+
+Even if the thinker's prefix cache match works perfectly, the overall speedup is limited because:
+
+**A. The image encoder dominates and has no caching.**
+The HF ViT re-encodes 9600 patches every request. There IS an encoder cache mechanism (`SimpleCacheManager` in `factory.py`, and `cache_key` in `preprocessor.py`), but examining the `create_encoder_engine` call in `stages.py`:
+```python
+engine = create_encoder_engine(model, device=device)  # use_cache defaults to False
+```
+The encoder engine is created with `use_cache=False` (the default). So encoder output caching is **disabled**.
+
+**B. The pipeline overhead is per-request, not per-token.**
+ZMQ messaging, SHM relay serialization, and stage coordination happen for every request regardless of how much computation is cached.
+
+**C. The thinker's effective prefix match may be incomplete.**
+The `omni_model_inputs` (containing video embeddings) are attached as a custom attribute on the `Req` object (`req.omni_model_inputs`). These are NOT part of SGLang's standard prefix matching key. The `extra_key` field on the `Req` is never set in sglang_omni code (confirmed by grepping — zero matches). This means the tree cache matches purely on token IDs, which could lead to incorrect cache hits if different video content produced the same token ID sequence — but for our case (same video), this is actually fine.
+
+### 5.5 Conclusion: Three Layers of Missing Caching
+
+The second-round slowness stems from **three independent layers** where caching is absent or ineffective:
+
+| Layer | What Should Be Cached | Current State | Impact |
+|-------|----------------------|---------------|--------|
+| **Encoder outputs** | ViT embeddings for the same video | `use_cache=False` — disabled | **~15-25s wasted** re-encoding same video |
+| **Preprocessing** | Tokenized inputs for the same video | No caching — re-tokenizes everything | ~0.5s wasted (minor) |
+| **Thinker KV cache** | KV states for shared token prefix | Tree cache exists, `release_kv_cache` stores entries, but effectiveness unclear due to multimodal embedding flow | **Potentially ~10-15s** if prefix match works; needs verification |
+
+The biggest win would be **enabling encoder output caching** (`use_cache=True` in `create_encoder_engine`), which would eliminate the redundant ViT computation. The second win would be verifying and ensuring the SGLang tree cache prefix match works correctly for multi-turn multimodal conversations.
+
+### 5.6 Potential Fix Directions
+
+1. **Enable encoder cache**: Change `create_encoder_engine(model, device=device)` to `create_encoder_engine(model, device=device, use_cache=True)` in `_create_encoder_executor`. The `cache_key` is already computed from the video path in the preprocessor (`compute_video_cache_key`), so the infrastructure exists — it just needs to be turned on.
+
+2. **Conversation-level state management**: Implement a mechanism to carry encoder outputs and thinker KV cache state across API requests that share the same conversation context. This is a deeper architectural change.
+
+3. **Set `extra_key` for multimodal requests**: To make SGLang's tree cache more robust for multimodal content, set `req.extra_key` based on the video/image content hash so that prefix matching is content-aware.
+
+---
+
+## 6. Directions Explored But Not Pursued
 
 ### 5.1 Replacing HF Image Encoder with SGLang-native
 
