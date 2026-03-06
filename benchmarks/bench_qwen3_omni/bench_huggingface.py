@@ -146,7 +146,9 @@ def main():
                 text_ids = model.generate(
                     **inputs,
                     use_audio_in_video=True,
-                    generation_config=GenerationConfig(max_new_tokens=2048),
+                    generation_config=GenerationConfig(
+                        max_new_tokens=1024, early_stopping=True
+                    ),
                 )
                 input_ids_length = inputs["input_ids"].shape[1]
                 response_ids = text_ids[:, input_ids_length:]
