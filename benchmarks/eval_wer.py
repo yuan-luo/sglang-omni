@@ -67,11 +67,6 @@ def parse_meta_lst(path: str) -> list[dict]:
 
 
 def normalize_text(text: str, lang: str) -> str:
-    """Normalize text for WER computation.
-
-    EN: lowercase, strip ASCII punctuation (keep apostrophe), collapse whitespace.
-    ZH: strip both Chinese and ASCII punctuation, insert space between each char.
-    """
     if lang == "zh":
         from zhon.hanzi import punctuation as zh_punct
 
@@ -96,7 +91,6 @@ def normalize_text(text: str, lang: str) -> str:
 
 
 def load_asr_model(lang: str, device: str):
-    """Load ASR model: Whisper for EN, FunASR paraformer-zh for ZH."""
     if lang == "en":
         from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
@@ -121,7 +115,6 @@ def load_asr_model(lang: str, device: str):
 
 
 def transcribe(asr, wav_path: str, lang: str, device: str) -> str:
-    """Transcribe a WAV file using the loaded ASR model."""
     if asr["type"] == "whisper":
         processor = asr["processor"]
         model = asr["model"]

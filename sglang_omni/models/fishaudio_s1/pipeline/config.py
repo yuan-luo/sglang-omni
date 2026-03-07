@@ -25,26 +25,7 @@ def create_tts_pipeline_config(
 ) -> PipelineConfig:
     """Create a 3-stage TTS pipeline config for FishAudio-S1.
 
-    Stages::
-
-        preprocessing (CPU)  →  tts_engine (GPU)  →  vocoder (GPU)
-           tokenize text         DualAR decode        DAC codec decode
-           encode ref audio      VQ code generation    VQ codes → audio
-
-    Args:
-        model_id: HF model ID or local checkpoint path.
-        tts_device: Device for the TTS engine stage.
-        vocoder_device: Device for the vocoder stage.
-        max_new_tokens: Maximum decode steps for the TTS engine.
-        max_seq_len: Maximum sequence length for KV cache allocation.
-        use_compile: Enable torch.compile for decode steps.
-        use_radix_cache: Enable radix-tree prefix cache for voice ref reuse.
-        relay_type: Tensor relay backend (``"shm"``, ``"nccl"``, ``"nixl"``).
-        fused_stages: Optional stage fusion groups, e.g.
-            ``[["preprocessing", "tts_engine", "vocoder"]]`` for single-GPU.
-
-    Returns:
-        A :class:`PipelineConfig` ready for ``compile_pipeline()``.
+    Stages: preprocessing (CPU) -> tts_engine (GPU) -> vocoder (GPU).
     """
 
     _pkg = "sglang_omni.models.fishaudio_s1.pipeline"

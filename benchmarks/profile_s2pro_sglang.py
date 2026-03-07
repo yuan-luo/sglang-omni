@@ -226,7 +226,6 @@ async def profile_single_request(
     device,
     audio_dir=None,
 ) -> RequestMetrics:
-    """Profile a single request with TTFT and TTFB measurement via streaming."""
     data = build_request_data(
         sample,
         adapter,
@@ -323,7 +322,6 @@ async def profile_batch(
     max_new_tokens,
     device,
 ) -> list[RequestMetrics]:
-    """Profile a batch of concurrent requests."""
     batch_size = len(samples)
 
     # Pre-build all request data

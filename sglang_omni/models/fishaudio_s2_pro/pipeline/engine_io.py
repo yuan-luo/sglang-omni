@@ -16,7 +16,6 @@ from sglang_omni.models.fishaudio_s2_pro.runtime.s2pro_sglang_ar import (
 def build_sglang_tts_request(
     state: S2ProState, tokenizer: Any
 ) -> S2ProSGLangRequestData:
-    """Convert pipeline state into S2ProSGLangRequestData for the SGLang engine."""
     from sglang.srt.managers.schedule_batch import Req
     from sglang.srt.sampling.sampling_params import SamplingParams
 
@@ -67,7 +66,6 @@ def build_sglang_tts_request(
 
 
 def apply_tts_result(state: S2ProState, result: S2ProSGLangRequestData) -> None:
-    """Extract output codes from engine result and store in pipeline state."""
     if result.output_codes:
         state.output_codes = torch.cat(result.output_codes, dim=1)
     else:

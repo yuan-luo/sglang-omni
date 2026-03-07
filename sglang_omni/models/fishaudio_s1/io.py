@@ -11,11 +11,7 @@ import torch
 
 @dataclass
 class FishAudioState:
-    """Typed view of the per-request pipeline state for FishAudio TTS.
-
-    Tensors are stored as nested Python lists when crossing process boundaries
-    (msgpack-safe).  Use :meth:`to_dict` / :meth:`from_dict` for conversion.
-    """
+    """Per-request pipeline state for FishAudio TTS."""
 
     # -- From preprocessing ------------------------------------------------
     input_values: Any = None  # [num_codebooks+1, seq_len] as nested list
@@ -52,7 +48,6 @@ class FishAudioState:
         return v
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to a plain dict with tensors serialised as nested lists."""
         data: dict[str, Any] = {}
         if self.input_values is not None:
             data["input_values"] = self._tensor_to_list(self.input_values)
@@ -75,7 +70,6 @@ class FishAudioState:
 
     @classmethod
     def from_dict(cls, data: Any) -> FishAudioState:
-        """Reconstruct from a plain dict (inverse of :meth:`to_dict`)."""
         if not isinstance(data, dict):
             data = {}
         return cls(

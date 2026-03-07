@@ -79,12 +79,7 @@ class FishTokenizerAdapter:
         modality: str = "interleave",
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        """Build a DualAR prompt from text and optional voice references.
-
-        Returns:
-            ``(values, audio_masks, audio_parts)`` where
-            ``values`` has shape ``[num_codebooks+1, seq_len]``.
-        """
+        """Build a DualAR prompt from text and optional voice references."""
         from fish_speech.content_sequence import ContentSequence, TextPart, VQPart
 
         seq = ContentSequence(modality=modality)

@@ -128,7 +128,6 @@ def run_benchmark(args):
         return indices.cpu()
 
     def vocode(vq_parts_out: torch.Tensor) -> tuple[torch.Tensor, int]:
-        """Generated VQ codes [num_semantic, num_codebooks] -> (audio_1d, sr)."""
         # vq_parts_out from generate is [num_semantic, num_codebooks]
         # codec.from_indices expects [batch, num_codebooks, T]
         codebook_codes = vq_parts_out.T.to(device).unsqueeze(0)  # [1, num_cb, T]
@@ -137,7 +136,6 @@ def run_benchmark(args):
         return audio_out[0, 0].float().cpu(), codec.sample_rate
 
     def build_prompt_tensors(sample: dict):
-        """Build input_ids, vq_mask_tokens, vq_parts for a sample."""
         ref_codes = encode_ref_audio(sample["ref_audio"])
         refs = [Reference(audio_bytes=b"", text=sample["ref_text"], vq_codes=ref_codes)]
         prompt = adapter.build_prompt(

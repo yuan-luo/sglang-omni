@@ -26,7 +26,6 @@ class S2ProStepOutput:
 
 
 def _multinomial_no_sync(probs: Tensor) -> Tensor:
-    """Sample one token. Uses torch.multinomial for torch.compile compatibility."""
     return torch.multinomial(probs, num_samples=1).to(dtype=torch.int)
 
 
@@ -38,7 +37,6 @@ def _sample_with_topk(
     repetition_penalty: Tensor | None = None,
     previous_tokens: Tensor | None = None,
 ) -> Tensor:
-    """Sample one token with top-k + top-p filtering."""
     # Repetition penalty
     if previous_tokens is not None and repetition_penalty is not None:
         prev = previous_tokens.long()

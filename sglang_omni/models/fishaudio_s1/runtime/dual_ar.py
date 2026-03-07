@@ -106,11 +106,6 @@ class DualARBatchData:
 
 
 def snapshot_slow_kv(model: Any, length: int) -> list[tuple[Tensor, Tensor]]:
-    """Clone slow KV cache slices ``[:, :, :length, :]`` from all layers.
-
-    Works with fish-speech's ``KVCache`` class which has ``k_cache``/``v_cache``
-    as registered buffers of shape ``[B, H, max_seq_len, D]``.
-    """
     result = []
     for layer in model.layers:
         kv = layer.attention.kv_cache
@@ -124,7 +119,6 @@ def snapshot_slow_kv(model: Any, length: int) -> list[tuple[Tensor, Tensor]]:
 
 
 def restore_slow_kv(model: Any, kv_data: list[tuple[Tensor, Tensor]]) -> None:
-    """Write saved KV slices back into model layer caches."""
     for (k, v), layer in zip(kv_data, model.layers):
         length = k.shape[2]
         layer.attention.kv_cache.k_cache[:, :, :length, :].copy_(k)
@@ -137,7 +131,7 @@ def restore_slow_kv(model: Any, kv_data: list[tuple[Tensor, Tensor]]) -> None:
 
 
 def _multinomial_no_sync(probs: Tensor) -> Tensor:
-    """Gumbel-max trick: sample without CUDA sync (compilable)."""
+    # Gumbel-max trick: sample without CUDA sync (compilable)
     q = torch.empty_like(probs).exponential_(1)
     return torch.argmax(probs / q, dim=-1, keepdim=True).to(dtype=torch.int)
 
@@ -149,7 +143,6 @@ def _sample(
     repetition_penalty: Tensor,
     previous_tokens: Tensor | None = None,
 ) -> Tensor:
-    """Sample one token from logits (compilable, no Python objects)."""
     # Repetition penalty
     if previous_tokens is not None:
         prev = previous_tokens.long()
@@ -189,12 +182,7 @@ def decode_one_token(
 ) -> Tensor:
     """Full decode step: slow forward + sample + fast loop (compilable).
 
-    This function mirrors fish-speech's ``decode_one_token_ar`` and is
-    designed to be wrapped with ``torch.compile(mode='reduce-overhead',
-    fullgraph=True)``.
-
-    Returns:
-        ``[num_codebooks+1, 1]`` tensor of sampled token IDs.
+    Returns [num_codebooks+1, 1] tensor of sampled token IDs.
     """
     # 1. Slow forward
     out = model.forward_generate(x, input_pos)
@@ -461,7 +449,6 @@ class DualAROutputProcessor:
             )
 
     def cleanup(self) -> None:
-        """Release compiled CUDA graph state to avoid segfault at exit."""
         self._compiled_decode = None
         self._model = None
 
@@ -503,7 +490,6 @@ class DualAROutputProcessor:
     def _process_compiled(
         self, data: DualARRequestData, batch_data: DualARBatchData
     ) -> Tensor:
-        """Decode via compiled decode_one_token (slow + fast in one graph)."""
         device = batch_data.input_values.device
         x = batch_data.input_values.to(device)
         input_pos = batch_data.input_pos.to(device)
@@ -536,7 +522,6 @@ class DualAROutputProcessor:
         return codes.clone()
 
     def _process_eager(self, model_output: Any, data: DualARRequestData) -> Tensor:
-        """Decode via eager execution (original path)."""
         ctx = SamplingContext(
             request_id="",
             temperature=data.temperature,
@@ -600,11 +585,7 @@ class DualAROutputProcessor:
     def _get_compiled_window(
         self, data: DualARRequestData, device: torch.device
     ) -> Tensor:
-        """Build previous_tokens tensor for compiled path.
-
-        Always returns a fixed-size ``[1, num_codebooks+1, WINDOW]`` tensor
-        (zero-padded on the left) to avoid shape-triggered recompilations.
-        """
+        # Fixed-size [1, num_codebooks+1, WINDOW] to avoid recompilations
         W = self._COMPILED_WINDOW
         rows = self._num_codebooks + 1
         if not data.output_codes:

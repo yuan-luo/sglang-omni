@@ -159,7 +159,6 @@ async def run_benchmark(args):
         return indices.cpu()
 
     def vocode(all_codes: torch.Tensor) -> tuple[torch.Tensor, int]:
-        """VQ codes [num_cb+1, T] -> (audio_1d, sample_rate)."""
         codebook_codes = all_codes[1:].to(device)  # [num_codebooks, T]
         with torch.no_grad():
             audio_out = codec.from_indices(codebook_codes[None])

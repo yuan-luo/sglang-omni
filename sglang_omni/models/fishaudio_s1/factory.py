@@ -93,48 +93,7 @@ def create_dual_ar_engine(
     radix_cache_size: int = 256,
     use_compile: bool = False,
 ) -> OmniEngine:
-    """Create an engine for DualARTransformer (FishAudio-S1) models.
-
-    Args:
-        model: A ``DualARTransformer`` instance (already loaded).
-        tokenizer: ``FishTokenizer`` or any object with ``get_token_id()``.
-        num_codebooks: Number of VQ codebooks (default 4).
-        codebook_size: Size of each codebook (default 1024).
-        max_new_tokens: Maximum decode steps.
-        device: Device to run on.
-        logits_processors: Optional extra logits processors (appended to
-            the default pipeline).
-        sampler: Override the default ``MultinomialNoSyncSampler``.
-        use_radix_cache: Enable radix-tree prefix cache for voice
-            cloning reference reuse.
-        radix_cache_size: Maximum radix cache entries.
-        use_compile: Use torch.compile for decode step optimization.
-
-    Returns:
-        ``OmniEngine`` configured for DualAR TTS.
-
-    Example::
-
-        from fish_speech.models.text2semantic.llama import DualARTransformer
-        from fish_speech.tokenizer import FishTokenizer
-
-        model = DualARTransformer.from_pretrained("checkpoints/openaudio-s1-mini", load_weights=True)
-        tokenizer = FishTokenizer.from_pretrained("checkpoints/openaudio-s1-mini")
-
-        engine = create_dual_ar_engine(model, tokenizer, device="cuda")
-        await engine.start()
-
-        adapter = FishTokenizerAdapter(tokenizer)
-        values, audio_masks, audio_parts = adapter.build_prompt("Hello world")
-        data = DualARRequestData(
-            input_values=values,
-            audio_masks=audio_masks,
-            audio_parts=audio_parts,
-            max_new_tokens=1024,
-        )
-        await engine.add_request("req-1", data)
-        result = await engine.get_result("req-1")  # DualARRequestData with output_codes
-    """
+    """Create an OmniEngine for DualARTransformer (FishAudio-S1) models."""
     adapter = FishTokenizerAdapter(tokenizer)
     im_end_id = adapter.eos_token_ids[0]
 

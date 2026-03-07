@@ -20,12 +20,7 @@ from .tokenizer import S2ProTokenizerAdapter
 
 
 def _patch_fish_config_for_sglang(model_path: str) -> None:
-    """Patch FishQwen3Config to add standard HF attribute names.
-
-    SGLang's ModelConfig expects num_attention_heads, hidden_size, etc.
-    FishQwen3Config uses n_head, dim, n_layer. This patches the config
-    class so both naming conventions work.
-    """
+    """Patch FishQwen3Config to add standard HF attribute aliases for SGLang."""
     import fish_speech.models.text2semantic.modeling  # registers AutoConfig
     from fish_speech.models.text2semantic.modeling import (
         FishQwen3Config,
@@ -66,13 +61,7 @@ def _patch_fish_config_for_sglang(model_path: str) -> None:
 
 
 def _truncate_rope_to_bf16(model: torch.nn.Module) -> None:
-    """Truncate RotaryEmbedding cos/sin caches to bf16 precision.
-
-    fish_speech precomputes RoPE tables in bf16 during training. SGLang uses
-    float32, causing numerical divergence through 36 transformer layers that
-    shifts the logit distribution enough to trigger spurious early EOS.
-    Truncating to bf16 then back to float32 matches the training precision.
-    """
+    # Match fish_speech's bf16 RoPE training precision to avoid logit divergence
     for module in model.modules():
         if hasattr(module, "cos_sin_cache") and isinstance(
             module.cos_sin_cache, torch.Tensor
@@ -97,32 +86,7 @@ def create_s2pro_sglang_engine(
     ras_top_p: float = 0.95,
     use_torch_compile: bool = True,
 ) -> OmniEngine:
-    """Create a paged-attention S2-Pro engine using SGLang backend.
-
-    The text model uses SGLang's RadixAttention with paged KV cache for
-    efficient prefix caching and memory management. The audio decoder
-    keeps its static KVCache (11 tokens, reset every step).
-
-    Args:
-        server_args: SGLang ServerArgs configuration. ``model_path`` should
-            point to the S2-Pro checkpoint directory.
-        audio_decoder: A ``FishQwen3AudioDecoder`` instance with static
-            KVCache already set up (via ``setup_caches``).
-        tokenizer: ``PreTrainedTokenizerFast`` instance.
-        gpu_id: GPU device ID.
-        num_codebooks: Number of VQ codebooks (default 10).
-        codebook_size: Size of each codebook (default 4096).
-        max_new_tokens: Maximum decode steps.
-        top_k: Top-k sampling parameter.
-        ras_window: RAS window size for repetition detection.
-        ras_temperature: Temperature when RAS triggers.
-        ras_top_p: Top-p when RAS triggers.
-        use_torch_compile: Compile the audio decoder codebook loop
-            with ``torch.compile`` (default True).
-
-    Returns:
-        ``OmniEngine`` configured for paged-attention S2-Pro TTS.
-    """
+    """Create a paged-attention S2-Pro engine using SGLang backend."""
     from sglang_omni.engines.ar.sglang_backend.model_worker import (
         ModelWorker,
         ModelWorkerConfig,

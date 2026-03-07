@@ -70,18 +70,7 @@ class S2ProTokenizerAdapter:
         speaker: int | str = 0,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Build an S2-Pro prompt using Qwen3 chat format.
-
-        The prompt format follows the official s2-pro-alpha inference:
-        - System message with reference text and VQ codes
-        - User message with target text
-        - Assistant message with ``<|voice|>`` modality marker
-
-        Returns a dict with keys:
-            - input_ids: [seq_len] token IDs (1D)
-            - vq_mask_tokens: [seq_len] boolean mask for VQ positions
-            - vq_parts: list of [num_codebooks, T] VQ code tensors
-        """
+        """Build an S2-Pro prompt using Qwen3 chat format."""
         from fish_speech.content_sequence import TextPart, VQPart
         from fish_speech.conversation import Conversation, Message
 

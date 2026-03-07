@@ -265,11 +265,7 @@ class S2ProSGLangTextModel(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: Optional[Tensor] = None,
     ) -> LogitsProcessorOutput:
-        """Forward pass returning LogitsProcessorOutput.
-
-        Always returns hidden_states for the audio decoder's codebook generation.
-        Handles last-token pruning for extend (prefill) mode.
-        """
+        """Forward pass. Returns LogitsProcessorOutput with hidden_states."""
         # Check forward_batch.input_embeds as fallback (decode mode doesn't
         # pass input_embeds kwarg but we set it on the batch)
         if (
@@ -410,7 +406,6 @@ class S2ProSGLangTextModel(nn.Module):
         wqkv: Tensor,
         params_dict: dict[str, nn.Parameter],
     ) -> bool:
-        """Split fused wqkv [q_size+kv_size+kv_size, dim] into q/k/v shards."""
         target_name = prefix + "self_attn.qkv_proj.weight"
         if target_name not in params_dict:
             return True

@@ -11,11 +11,7 @@ import torch
 
 @dataclass
 class S2ProState:
-    """Typed view of the per-request pipeline state for S2-Pro TTS.
-
-    Unlike S1's FishAudioState which uses multi-row input_values,
-    S2-Pro uses 1D input_ids with separate VQ mask/parts.
-    """
+    """Per-request pipeline state for S2-Pro TTS."""
 
     # -- From preprocessing ------------------------------------------------
     input_ids: Any = None  # [seq_len] as list

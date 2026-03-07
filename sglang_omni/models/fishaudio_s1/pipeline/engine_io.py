@@ -12,7 +12,6 @@ from sglang_omni.models.fishaudio_s1.runtime.dual_ar import DualARRequestData
 
 
 def build_tts_request(state: FishAudioState) -> DualARRequestData:
-    """Convert pipeline state into a DualARRequestData for the engine."""
     input_values = state.input_values
     if not isinstance(input_values, torch.Tensor):
         input_values = torch.tensor(input_values)
@@ -38,7 +37,6 @@ def build_tts_request(state: FishAudioState) -> DualARRequestData:
 
 
 def apply_tts_result(state: FishAudioState, result: Any) -> None:
-    """Extract output codes from engine result and store in pipeline state."""
     if isinstance(result, DualARRequestData):
         if result.output_codes:
             all_codes = torch.cat(result.output_codes, dim=1)

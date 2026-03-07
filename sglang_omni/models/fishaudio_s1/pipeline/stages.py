@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_checkpoint(checkpoint: str) -> str:
-    """Resolve an HF model ID to a local snapshot path, or return as-is."""
     if os.path.isdir(checkpoint):
         return checkpoint
     from huggingface_hub import snapshot_download
@@ -37,7 +36,6 @@ def _resolve_checkpoint(checkpoint: str) -> str:
 
 
 def _load_model_and_tokenizer(checkpoint: str, device: str):
-    """Load DualARTransformer and FishTokenizer from a checkpoint."""
     from fish_speech.models.text2semantic.llama import DualARTransformer
     from fish_speech.tokenizer import FishTokenizer
 
@@ -54,7 +52,6 @@ def _load_model_and_tokenizer(checkpoint: str, device: str):
 
 
 def _load_codec(checkpoint_dir: str, device: str):
-    """Load the DAC codec from codec.pth inside the checkpoint directory."""
     from hydra.utils import instantiate
     from omegaconf import OmegaConf
 
@@ -97,11 +94,6 @@ def _load_codec(checkpoint_dir: str, device: str):
 
 
 def create_preprocessing_executor(model_id: str) -> PreprocessingExecutor:
-    """Factory for the preprocessing stage.
-
-    Loads ``FishTokenizer`` and DAC codec once.  For each request, tokenizes
-    text, encodes reference audio (if provided), and builds the DualAR prompt.
-    """
     checkpoint_dir = _resolve_checkpoint(model_id)
 
     from fish_speech.tokenizer import FishTokenizer
@@ -218,11 +210,7 @@ def create_tts_engine_executor(
     use_compile: bool = False,
     use_radix_cache: bool = False,
 ) -> EngineExecutor:
-    """Factory for the TTS engine stage.
-
-    Loads the DualARTransformer and creates an OmniEngine via
-    :func:`create_dual_ar_engine`.
-    """
+    """Factory for the TTS engine stage."""
     from sglang_omni.models.fishaudio_s1.factory import create_dual_ar_engine
 
     model, tokenizer, _checkpoint_dir = _load_model_and_tokenizer(model_id, device)
@@ -267,10 +255,7 @@ def create_vocoder_executor(
     *,
     device: str = "cuda:0",
 ) -> PreprocessingExecutor:
-    """Factory for the vocoder stage.
-
-    Loads the DAC codec once and decodes VQ codes to audio waveform.
-    """
+    """Factory for the vocoder stage."""
     checkpoint_dir = _resolve_checkpoint(model_id)
     codec = _load_codec(checkpoint_dir, device)
 

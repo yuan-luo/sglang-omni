@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Radix-tree prefix cache for DualAR models in sglang-omni.
-
-Usage:
-    cache = DualARRadixCache(max_tokens=50000)
-    # During prefill, after computing KV cache:
-    cache.insert(prefix_tokens_row0, kv_data)
-    # For a new request with the same voice reference:
-    matched_len, kv_data, node = cache.match_prefix(new_request_tokens_row0)
-    if matched_len > 0:
-        cache.inc_lock_ref(node)  # protect from eviction while in use
-        # restore KV, trim input, run suffix-only prefill
-        ...
-        cache.dec_lock_ref(node)  # release after request completes
-"""
+"""Radix-tree prefix cache for DualAR models in sglang-omni."""
 
 from __future__ import annotations
 
@@ -33,13 +20,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TreeNode:
-    """A node in the radix tree.
-
-    Each node represents a position in the token sequence. The ``key``
-    field holds the token IDs on the edge from parent to this node.
-    ``kv_data`` stores cloned per-layer (k, v) tensor pairs when this
-    node is an insertion point.
-    """
+    """A node in the radix tree."""
 
     children: dict[int, TreeNode] = field(default_factory=dict)
     parent: TreeNode | None = None
@@ -55,7 +36,6 @@ class TreeNode:
 
     @property
     def num_tokens(self) -> int:
-        """Number of tokens stored on the edge to this node."""
         return len(self.key)
 
 
@@ -67,13 +47,8 @@ class TreeNode:
 class DualARRadixCache:
     """Radix-tree prefix cache for DualAR KV cache reuse.
 
-    Keys are 1-D sequences of semantic token IDs (row 0 of the multi-row
-    input). Values are per-layer ``(k_clone, v_clone)`` tensor pairs.
-
-    Follows upstream SGLang patterns:
-    - Edge splitting on insert when a new key diverges mid-edge
-    - Lock reference counting (inc/dec walk root-to-leaf path)
-    - Leaf-only LRU eviction (only evict leaves with lock_ref == 0)
+    Keys are 1-D semantic token ID sequences (row 0). Values are
+    per-layer (k_clone, v_clone) tensor pairs.
     """
 
     def __init__(self, max_tokens: int = 50000) -> None:
@@ -96,15 +71,7 @@ class DualARRadixCache:
     ) -> tuple[int, list[tuple[Tensor, Tensor]] | None, TreeNode]:
         """Find the longest cached prefix match.
 
-        Args:
-            tokens: 1-D token sequence (row 0 of DualAR input).
-
-        Returns:
-            ``(matched_length, kv_data_or_None, last_matched_node)``
-            where ``kv_data`` is the stored KV data at the deepest
-            matching node that has cached data, or ``None`` if no match.
-            ``last_matched_node`` is the deepest node reached (for lock
-            management).
+        Returns (matched_length, kv_data_or_None, last_matched_node).
         """
         if isinstance(tokens, torch.Tensor):
             tokens = tokens.tolist()
@@ -174,19 +141,7 @@ class DualARRadixCache:
         tokens: list[int] | torch.Tensor,
         kv_data: list[tuple[Tensor, Tensor]],
     ) -> int:
-        """Insert a prefix and its associated KV cache data.
-
-        If the prefix (or a prefix of it) is already cached, only the
-        new suffix is added. Returns the length of the already-cached
-        prefix (for dedup awareness).
-
-        Args:
-            tokens: 1-D token sequence (row 0).
-            kv_data: Per-layer ``(k_clone, v_clone)`` tensor pairs.
-
-        Returns:
-            Length of the prefix that was already cached.
-        """
+        """Insert a prefix and its KV cache data. Returns already-cached prefix length."""
         if isinstance(tokens, torch.Tensor):
             tokens = tokens.tolist()
 
@@ -264,37 +219,19 @@ class DualARRadixCache:
         return already_cached
 
     def inc_lock_ref(self, node: TreeNode) -> None:
-        """Lock path from node to root (protects from eviction).
-
-        Following upstream SGLang: walk from the given node up to root,
-        incrementing ``lock_ref`` on each node.
-        """
         current: TreeNode | None = node
         while current is not None and current is not self._root:
             current.lock_ref += 1
             current = current.parent
 
     def dec_lock_ref(self, node: TreeNode) -> None:
-        """Unlock path from node to root.
-
-        Decrements ``lock_ref`` on each node from the given node to root.
-        Nodes that reach ``lock_ref == 0`` become eligible for eviction.
-        """
         current: TreeNode | None = node
         while current is not None and current is not self._root:
             current.lock_ref = max(0, current.lock_ref - 1)
             current = current.parent
 
     def evict(self, num_tokens: int) -> int:
-        """Evict LRU leaves to free at least ``num_tokens`` of capacity.
-
-        Only evicts leaf nodes with ``lock_ref == 0``. Following upstream
-        SGLang: after evicting a leaf, its parent may become a new leaf
-        eligible for eviction.
-
-        Returns:
-            Number of tokens actually evicted.
-        """
+        """Evict LRU leaves to free at least num_tokens. Returns tokens actually evicted."""
         evicted = 0
         while evicted < num_tokens:
             leaf = self._find_lru_leaf()
@@ -304,28 +241,14 @@ class DualARRadixCache:
         return evicted
 
     def clear(self) -> None:
-        """Remove all cached entries."""
         self._root = TreeNode()
         self._total_tokens = 0
 
     @property
     def total_tokens(self) -> int:
-        """Total number of tokens stored across all edges."""
         return self._total_tokens
 
     def stats(self) -> dict:
-        """Return cache statistics following SGLang conventions.
-
-        Returns a dict with:
-        - ``num_matches``: number of match_prefix calls that returned KV data
-        - ``num_misses``: number of match_prefix calls that returned None
-        - ``hit_rate``: matches / (matches + misses), or 0.0 if no queries
-        - ``token_hit_rate``: matched_tokens / query_tokens, or 0.0
-        - ``total_matched_tokens``: cumulative matched prefix tokens
-        - ``total_query_tokens``: cumulative queried tokens
-        - ``total_cached_tokens``: tokens currently stored in the tree
-        - ``num_entries``: number of leaf nodes (cached sequences)
-        """
         total = self._num_matches + self._num_misses
         return {
             "num_matches": self._num_matches,
@@ -343,14 +266,12 @@ class DualARRadixCache:
         }
 
     def reset_stats(self) -> None:
-        """Reset hit/miss counters (does not clear cached data)."""
         self._num_matches = 0
         self._num_misses = 0
         self._total_matched_tokens = 0
         self._total_query_tokens = 0
 
     def _count_leaves(self) -> int:
-        """Count leaf nodes with KV data."""
         count = 0
 
         def _walk(node: TreeNode) -> None:
@@ -368,14 +289,6 @@ class DualARRadixCache:
     # ------------------------------------------------------------------
 
     def _split_node(self, node: TreeNode, split_pos: int) -> TreeNode:
-        """Split a node's edge at ``split_pos``.
-
-        Given a node with edge key ``[a, b, c, d, e]`` and split_pos=2,
-        creates a new mid-node with key ``[a, b]`` and pushes the
-        original node down with key ``[c, d, e]``.
-
-        Returns the new mid-node.
-        """
         assert (
             0 < split_pos < len(node.key)
         ), f"split_pos={split_pos} out of range for key length {len(node.key)}"
@@ -414,7 +327,6 @@ class DualARRadixCache:
         return mid_node
 
     def _find_lru_leaf(self) -> TreeNode | None:
-        """Find the least-recently-used evictable leaf node."""
         best: TreeNode | None = None
         best_time = float("inf")
 
@@ -431,7 +343,6 @@ class DualARRadixCache:
         return best
 
     def _remove_leaf(self, leaf: TreeNode) -> int:
-        """Remove a leaf node and return the number of tokens freed."""
         assert leaf.is_leaf
         assert leaf.parent is not None
 
@@ -449,11 +360,6 @@ class DualARRadixCache:
         return tokens_freed
 
     def _evict_to_fit(self, needed_tokens: int) -> bool:
-        """Evict leaves until we have room for ``needed_tokens``.
-
-        Returns True if enough space was freed, False if the cache is full
-        and all leaves are locked (insert should be refused).
-        """
         while self._total_tokens + needed_tokens > self._max_tokens:
             leaf = self._find_lru_leaf()
             if leaf is None:

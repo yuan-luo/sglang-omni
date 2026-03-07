@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_checkpoint(checkpoint: str) -> str:
-    """Resolve an HF model ID to a local snapshot path, or return as-is."""
     if os.path.isdir(checkpoint):
         return checkpoint
     from huggingface_hub import snapshot_download
@@ -40,7 +39,6 @@ def _resolve_checkpoint(checkpoint: str) -> str:
 
 
 def _load_s2pro_model(checkpoint: str, device: str):
-    """Load FishQwen3OmniForCausalLM and HF tokenizer from a checkpoint."""
     from fish_speech.models.text2semantic.configuration import FishQwen3OmniConfig
     from fish_speech.models.text2semantic.modeling import FishQwen3OmniForCausalLM
     from transformers import PreTrainedTokenizerFast
@@ -59,7 +57,6 @@ def _load_s2pro_model(checkpoint: str, device: str):
 
 
 def _load_codec(checkpoint_dir: str, device: str):
-    """Load the DAC codec from codec.pth inside the checkpoint directory."""
     from hydra.utils import instantiate
     from omegaconf import OmegaConf
 
@@ -102,11 +99,6 @@ def _load_codec(checkpoint_dir: str, device: str):
 
 
 def create_preprocessing_executor(model_path: str) -> PreprocessingExecutor:
-    """Factory for the S2-Pro preprocessing stage.
-
-    Loads HF tokenizer and DAC codec. Tokenizes text, encodes reference audio,
-    and builds the S2-Pro prompt using ContentSequence.encode().
-    """
     checkpoint_dir = _resolve_checkpoint(model_path)
 
     from transformers import PreTrainedTokenizerFast
@@ -220,7 +212,7 @@ def create_sglang_tts_engine_executor(
     max_new_tokens: int = 2048,
     top_k: int = 30,
 ) -> EngineExecutor:
-    """Factory for the S2-Pro TTS engine stage using SGLang paged attention."""
+    """Factory for the S2-Pro TTS engine stage."""
     from sglang.srt.server_args import ServerArgs
 
     from sglang_omni.models.fishaudio_s2_pro.factory import (
@@ -287,7 +279,7 @@ def create_vocoder_executor(
     *,
     device: str = "cuda:0",
 ) -> PreprocessingExecutor:
-    """Factory for the vocoder stage. Same codec as S1."""
+    """Factory for the vocoder stage."""
     checkpoint_dir = _resolve_checkpoint(model_path)
     codec = _load_codec(checkpoint_dir, device)
 
