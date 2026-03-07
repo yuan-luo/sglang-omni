@@ -315,6 +315,7 @@ def create_vocoder_executor(
         payload = store_state(payload, state)
 
         payload.data["audio_data"] = audio_np.tolist()
+        payload.data["sample_rate"] = codec.sample_rate
         payload.data["modality"] = "audio"
         return payload
 
