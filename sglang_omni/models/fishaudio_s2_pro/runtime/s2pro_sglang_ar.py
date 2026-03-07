@@ -513,9 +513,7 @@ class S2ProSGLangModelRunner:
                     )
                     if is_semantic:
                         semantic_indices.append(i)
-                        vq_parts_batch.append(
-                            data._last_codebook_values.to(device)
-                        )
+                        vq_parts_batch.append(data._last_codebook_values.to(device))
 
             if semantic_indices:
                 idx_t = torch.tensor(semantic_indices, device=device)

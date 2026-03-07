@@ -16,3 +16,57 @@ python examples/run_fishaudio_s2pro_e2e.py \
     --reference-audio ref.wav --reference-text "Transcript of ref audio." \
     --output output.wav
 ```
+
+## Benchmark Results (seed-tts-eval EN, 50 samples, no-compile)
+
+### Performance
+
+| Metric | BS=1 | BS=2 | BS=4 | BS=8 |
+|---|---|---|---|---|
+| tok/s (per-req) | 25.7 | 24.9 | 24.6 | 24.1 |
+| RTF | 0.84 | 0.87 | 0.88 | 0.89 |
+| Latency (mean) | 3.32s | 3.40s | 3.46s | 3.53s |
+| TTFT (mean) | 45.6ms | 44.1ms | 45.2ms | 46.2ms |
+| TTFB (mean) | 407.8ms | 429.3ms | 419.7ms | 422.3ms |
+
+Per-request tok/s degrades only 6% from BS=1 to BS=8, meaning the audio
+decoder codebook loop is efficiently batched across concurrent requests.
+
+### Quality
+
+| Metric | Value |
+|---|---|
+| Samples evaluated | 50 |
+| WER (mean) | 1.85% |
+| WER (median) | 0.0% |
+| Samples >50% WER | 0 (0.0%) |
+
+### Known Issues
+
+- `torch.compile` produces 99% WER (pre-existing bug, unrelated to batch changes). Use `--no-compile` for correct output. With compile enabled, single-request tok/s is ~60 but audio quality is broken.
+
+### Running Benchmarks
+
+```bash
+export S2PRO_CKPT=/root/.cache/huggingface/s2-pro/s2-pro
+tar xzf /root/.cache/huggingface/seed_tts_eval_testset.tar.gz -C /tmp
+export SEED_TTS=/tmp
+
+# Single request + WER
+CUDA_VISIBLE_DEVICES=0 python benchmarks/profile_s2pro_sglang.py \
+    --checkpoint $S2PRO_CKPT \
+    --testset $SEED_TTS/seedtts_testset/en/meta.lst \
+    --output-dir results/s2pro_sglang \
+    --max-samples 50 --batch-sizes 1 --save-audio --no-compile
+
+python benchmarks/eval_wer.py \
+    --meta $SEED_TTS/seedtts_testset/en/meta.lst \
+    --audio-dir results/s2pro_sglang/audio --lang en
+
+# Batched performance
+CUDA_VISIBLE_DEVICES=0 python benchmarks/profile_s2pro_sglang.py \
+    --checkpoint $S2PRO_CKPT \
+    --testset $SEED_TTS/seedtts_testset/en/meta.lst \
+    --output-dir results/s2pro_sglang_batched \
+    --max-samples 50 --batch-sizes 1,2,4,8 --no-compile
+```
