@@ -26,7 +26,8 @@ class S2ProStepOutput:
 
 
 def _multinomial_no_sync(probs: Tensor) -> Tensor:
-    return torch.multinomial(probs, num_samples=1).to(dtype=torch.int)
+    q = torch.empty_like(probs).exponential_(1)
+    return torch.argmax(probs / q, dim=-1, keepdim=True).to(dtype=torch.int)
 
 
 def _sample_with_topk(
