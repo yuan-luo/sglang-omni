@@ -42,12 +42,6 @@ class S2ProState:
             return t.tolist()
         return t
 
-    @staticmethod
-    def _list_to_tensor(v: Any) -> Any:
-        if isinstance(v, list):
-            return torch.tensor(v)
-        return v
-
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {}
         if self.input_ids is not None:
@@ -71,9 +65,7 @@ class S2ProState:
         return data
 
     @classmethod
-    def from_dict(cls, data: Any) -> S2ProState:
-        if not isinstance(data, dict):
-            data = {}
+    def from_dict(cls, data: dict) -> S2ProState:
         vq_parts = data.get("vq_parts")
         if vq_parts is not None:
             vq_parts = [torch.tensor(p) if isinstance(p, list) else p for p in vq_parts]
@@ -88,7 +80,9 @@ class S2ProState:
             top_p=data.get("top_p", 0.8),
             top_k=data.get("top_k", 30),
             repetition_penalty=data.get("repetition_penalty", 1.1),
-            output_codes=data.get("output_codes"),
+            output_codes=(
+                torch.tensor(data["output_codes"]) if "output_codes" in data else None
+            ),
             audio_samples=data.get("audio_samples"),
             sample_rate=data.get("sample_rate", 44100),
         )

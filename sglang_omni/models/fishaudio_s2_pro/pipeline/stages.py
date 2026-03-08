@@ -39,9 +39,14 @@ def _resolve_checkpoint(checkpoint: str) -> str:
 
 
 def _load_s2pro_model(checkpoint: str, device: str):
-    from sglang_omni.models.fishaudio_s2_pro.fish_speech.models.text2semantic.configuration import FishQwen3OmniConfig
-    from sglang_omni.models.fishaudio_s2_pro.fish_speech.models.text2semantic.modeling import FishQwen3OmniForCausalLM
     from transformers import PreTrainedTokenizerFast
+
+    from sglang_omni.models.fishaudio_s2_pro.fish_speech.models.text2semantic.configuration import (
+        FishQwen3OmniConfig,
+    )
+    from sglang_omni.models.fishaudio_s2_pro.fish_speech.models.text2semantic.modeling import (
+        FishQwen3OmniForCausalLM,
+    )
 
     checkpoint = _resolve_checkpoint(checkpoint)
     logger.info("Loading S2-Pro model from %s …", checkpoint)
@@ -78,14 +83,6 @@ def _load_codec(checkpoint_dir: str, device: str):
     state_dict = torch.load(
         codec_path, map_location=device, mmap=True, weights_only=True
     )
-    if "state_dict" in state_dict:
-        state_dict = state_dict["state_dict"]
-    if any("generator" in k for k in state_dict):
-        state_dict = {
-            k.replace("generator.", ""): v
-            for k, v in state_dict.items()
-            if "generator." in k
-        }
     codec.load_state_dict(state_dict, strict=False, assign=True)
     codec.eval()
     codec.to(device)
@@ -140,6 +137,7 @@ def create_preprocessing_executor(model_path: str) -> PreprocessingExecutor:
         inputs = payload.request.inputs or {}
         params = payload.request.params or {}
 
+        # Speech endpoint sends prompt as a plain string
         if isinstance(inputs, str):
             inputs = {"text": inputs}
 
@@ -150,15 +148,6 @@ def create_preprocessing_executor(model_path: str) -> PreprocessingExecutor:
         # Build voice-cloning references
         references: list[Reference] | None = None
         raw_refs = inputs.get("references")
-
-        if not raw_refs:
-            metadata = payload.request.metadata or {}
-            tts_params = metadata.get("tts_params", {})
-            ref_audio = tts_params.get("ref_audio")
-            if ref_audio:
-                raw_refs = [
-                    {"audio_path": ref_audio, "text": tts_params.get("ref_text", "")}
-                ]
         if raw_refs:
             references = []
             for ref_data in raw_refs:
@@ -285,14 +274,7 @@ def create_vocoder_executor(
 
     def _vocode(payload: StagePayload) -> StagePayload:
         state = load_state(payload)
-
         output_codes = state.output_codes
-        if output_codes is None:
-            state.audio_samples = None
-            return store_state(payload, state)
-
-        if not isinstance(output_codes, torch.Tensor):
-            output_codes = torch.tensor(output_codes)
 
         # output_codes: [num_codebooks+1, T] — rows 1..N are codebook indices
         codebook_codes = output_codes[1:].to(device)  # [num_codebooks, T]

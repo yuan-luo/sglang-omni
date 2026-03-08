@@ -207,25 +207,21 @@ class S2ProSGLangTextModel(nn.Module):
     ) -> None:
         super().__init__()
 
-        # When called by SGLang's model loader, config is a FishQwen3Config
+        # When called by SGLang's model loader, config is a FishQwen3OmniConfig
         if config is not None:
-            tc = config.text_config if hasattr(config, "text_config") else config
-            vocab_size = getattr(tc, "vocab_size", vocab_size)
-            hidden_size = getattr(tc, "dim", hidden_size)
-            intermediate_size = getattr(tc, "intermediate_size", intermediate_size)
-            num_layers = getattr(tc, "n_layer", num_layers)
-            num_heads = getattr(tc, "n_head", num_heads)
-            num_kv_heads = getattr(tc, "n_local_heads", num_kv_heads)
-            head_dim = getattr(tc, "head_dim", head_dim)
-            rope_base = getattr(tc, "rope_base", rope_base)
-            max_position_embeddings = getattr(
-                tc, "max_seq_len", max_position_embeddings
-            )
-            rms_norm_eps = getattr(tc, "norm_eps", rms_norm_eps)
-            qk_norm = getattr(tc, "attention_qk_norm", qk_norm)
-            tie_word_embeddings = getattr(
-                tc, "tie_word_embeddings", tie_word_embeddings
-            )
+            tc = config.text_config
+            vocab_size = tc.vocab_size
+            hidden_size = tc.dim
+            intermediate_size = tc.intermediate_size
+            num_layers = tc.n_layer
+            num_heads = tc.n_head
+            num_kv_heads = tc.n_local_heads
+            head_dim = tc.head_dim
+            rope_base = tc.rope_base
+            max_position_embeddings = tc.max_seq_len
+            rms_norm_eps = tc.norm_eps
+            qk_norm = tc.attention_qk_norm
+            tie_word_embeddings = tc.tie_word_embeddings
 
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
@@ -266,13 +262,7 @@ class S2ProSGLangTextModel(nn.Module):
         input_embeds: Optional[Tensor] = None,
     ) -> LogitsProcessorOutput:
         """Forward pass. Returns LogitsProcessorOutput with hidden_states."""
-        # Check forward_batch.input_embeds as fallback (decode mode doesn't
-        # pass input_embeds kwarg but we set it on the batch)
-        if (
-            input_embeds is None
-            and hasattr(forward_batch, "input_embeds")
-            and forward_batch.input_embeds is not None
-        ):
+        if input_embeds is None and forward_batch.input_embeds is not None:
             input_embeds = forward_batch.input_embeds
 
         if input_embeds is not None:
@@ -330,8 +320,6 @@ class S2ProSGLangTextModel(nn.Module):
             # Strip text_model.model. prefix
             if name.startswith("text_model.model."):
                 name = name[len("text_model.model.") :]
-            elif name.startswith("text_model."):
-                name = name[len("text_model.") :]
             else:
                 # Skip non-text-model weights (audio_decoder, etc.)
                 continue
@@ -386,10 +374,6 @@ class S2ProSGLangTextModel(nn.Module):
                 shard_id = None
 
             target_name = prefix + target_suffix
-            if target_name not in params_dict:
-                logger.debug("Target param not found: %s", target_name)
-                return True  # consumed but not loaded
-
             param = params_dict[target_name]
             if shard_id is not None:
                 param.weight_loader(param, loaded_weight, shard_id)

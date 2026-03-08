@@ -311,11 +311,7 @@ class S2ProSGLangIterationController:
             req.is_chunked -= 1
             return
 
-        step_out: S2ProStepOutput | None = output.data
-        if step_out is None:
-            return
-
-        codes = step_out.codes.clone()
+        codes = output.data.codes.clone()
         data.output_codes.append(codes)
 
         # Track semantic tokens for RAS
@@ -338,11 +334,7 @@ class S2ProSGLangIterationController:
         if data.req.is_chunked > 0:
             return False
 
-        step_out: S2ProStepOutput | None = output.data
-        if step_out is None:
-            return False
-
-        semantic_token = step_out.codes[0, -1].item()
+        semantic_token = output.data.codes[0, -1].item()
         if semantic_token == self._im_end_id:
             return True
 
@@ -370,7 +362,7 @@ class S2ProSGLangModelRunner:
         self,
         model_worker: "ModelWorker",
         output_processor: S2ProSGLangOutputProcessor,
-        batch_planner: SGLangBatchPlanner | None = None,
+        batch_planner: SGLangBatchPlanner,
     ):
         self.model_worker = model_worker
         self.output_processor = output_processor
@@ -462,9 +454,6 @@ class S2ProSGLangModelRunner:
         from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
         schedule_batch = scheduler_output.batch_data
-        if schedule_batch is None:
-            return ModelRunnerOutput(outputs={}, req_ids=[], req_id_to_index={})
-
         model_worker_batch = schedule_batch.get_model_worker_batch()
         is_prefill = schedule_batch.forward_mode.is_extend()
 
@@ -484,9 +473,7 @@ class S2ProSGLangModelRunner:
                 device=model_worker_batch.input_ids.device,
             )
 
-        # Record last batch for post-step
-        if self.batch_planner is not None:
-            self.batch_planner.record_last_batch(schedule_batch)
+        self.batch_planner.record_last_batch(schedule_batch)
 
         # Two-stage output processing (semantic + codebooks)
         outputs = self.output_processor.process(batch_result, scheduler_output)

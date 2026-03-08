@@ -19,28 +19,20 @@ def build_sglang_tts_request(
     from sglang.srt.managers.schedule_batch import Req
     from sglang.srt.sampling.sampling_params import SamplingParams
 
-    input_ids = state.input_ids
-    if isinstance(input_ids, torch.Tensor):
-        input_ids_list = input_ids.tolist()
-    else:
-        input_ids_list = list(input_ids)
-        input_ids = torch.tensor(input_ids_list, dtype=torch.long)
+    input_ids_list = list(state.input_ids)
+    input_ids = torch.tensor(input_ids_list, dtype=torch.long)
 
     vq_mask_tokens = state.vq_mask_tokens
-    if vq_mask_tokens is not None and not isinstance(vq_mask_tokens, torch.Tensor):
+    if vq_mask_tokens is not None:
         vq_mask_tokens = torch.tensor(vq_mask_tokens, dtype=torch.bool)
 
     vq_parts = state.vq_parts
     if vq_parts is not None:
-        vq_parts = [
-            p if isinstance(p, torch.Tensor) else torch.tensor(p) for p in vq_parts
-        ]
+        vq_parts = [torch.tensor(p) for p in vq_parts]
 
     sampling_params = SamplingParams(
         max_new_tokens=state.max_new_tokens, temperature=state.temperature
     )
-    sampling_params.normalize(tokenizer)
-    sampling_params.verify(tokenizer.vocab_size)
 
     req = Req(
         rid="",

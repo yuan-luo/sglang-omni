@@ -35,14 +35,10 @@ def _patch_fish_config_for_sglang(model_path: str) -> None:
 
     def _patched_text_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
-        if not hasattr(self, "num_attention_heads"):
-            self.num_attention_heads = self.n_head
-        if not hasattr(self, "hidden_size"):
-            self.hidden_size = self.dim
-        if not hasattr(self, "num_hidden_layers"):
-            self.num_hidden_layers = self.n_layer
-        if not hasattr(self, "num_key_value_heads"):
-            self.num_key_value_heads = self.n_local_heads
+        self.num_attention_heads = self.n_head
+        self.hidden_size = self.dim
+        self.num_hidden_layers = self.n_layer
+        self.num_key_value_heads = self.n_local_heads
         if self.architectures is None:
             self.architectures = ["S2ProSGLangTextModel"]
 
@@ -63,9 +59,7 @@ def _patch_fish_config_for_sglang(model_path: str) -> None:
 def _truncate_rope_to_bf16(model: torch.nn.Module) -> None:
     # Match fish_speech's bf16 RoPE training precision to avoid logit divergence
     for module in model.modules():
-        if hasattr(module, "cos_sin_cache") and isinstance(
-            module.cos_sin_cache, torch.Tensor
-        ):
+        if hasattr(module, "cos_sin_cache"):
             module.cos_sin_cache.data = module.cos_sin_cache.data.to(torch.bfloat16).to(
                 torch.float32
             )
@@ -178,7 +172,7 @@ def create_s2pro_sglang_engine(
 
     def _stream_adapter(request, output):
         step_out = output.data
-        if step_out is None or not hasattr(step_out, "codes"):
+        if step_out is None:
             return None
         return step_out.codes
 
@@ -188,8 +182,6 @@ def create_s2pro_sglang_engine(
         iteration_controller=iteration_ctrl,
         stream_adapter=_stream_adapter,
     )
-    model_runner = S2ProSGLangModelRunner(
-        model_worker, output_processor, batch_planner=batch_planner
-    )
+    model_runner = S2ProSGLangModelRunner(model_worker, output_processor, batch_planner)
 
     return OmniEngine(scheduler=scheduler, model_runner=model_runner)
