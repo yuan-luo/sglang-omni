@@ -9,7 +9,9 @@ from typing import Optional
 
 from transformers import PretrainedConfig
 
-from sglang_omni.models.fishaudio_s2_pro.fish_speech.models.text2semantic.utils import find_multiple
+from sglang_omni.models.fishaudio_s2_pro.fish_speech.models.text2semantic.utils import (
+    find_multiple,
+)
 from sglang_omni.models.fishaudio_s2_pro.fish_speech.utils import RankedLogger
 
 log = RankedLogger(__name__, rank_zero_only=True)
