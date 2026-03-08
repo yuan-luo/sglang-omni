@@ -11,6 +11,7 @@ static KVCache — it only handles 11 tokens per step, no OOM risk.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Iterable, Optional, Tuple
 
 import torch
@@ -207,6 +208,12 @@ class S2ProSGLangTextModel(nn.Module):
     ) -> None:
         super().__init__()
 
+        # Codebook defaults (overridden from audio_decoder_config when available)
+        num_codebooks: int = 10
+        codebook_size: int = 4096
+        semantic_begin_id: int = 0
+        semantic_end_id: int = 0
+
         # When called by SGLang's model loader, config is a FishQwen3Config
         if config is not None:
             tc = config.text_config if hasattr(config, "text_config") else config
@@ -227,12 +234,33 @@ class S2ProSGLangTextModel(nn.Module):
                 tc, "tie_word_embeddings", tie_word_embeddings
             )
 
+            # Extract codebook params from audio_decoder_config
+            adc = getattr(config, "audio_decoder_config", None)
+            if adc is not None:
+                num_codebooks = getattr(adc, "num_codebooks", num_codebooks)
+                codebook_size = getattr(adc, "vocab_size", codebook_size)
+
+            semantic_begin_id = getattr(config, "semantic_start_token_id", 0) or 0
+            semantic_end_id = getattr(config, "semantic_end_token_id", 0) or 0
+
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.tie_word_embeddings = tie_word_embeddings
 
+        # Fish-style inline VQ embedding params
+        self.num_codebooks = num_codebooks
+        self.codebook_size = codebook_size
+        self.semantic_begin_id = semantic_begin_id
+        self.semantic_end_id = semantic_end_id
+
         self.embed_tokens = VocabParallelEmbedding(vocab_size, hidden_size)
+
+        # Shared codebook embeddings (weights loaded from audio_decoder checkpoint)
+        self.codebook_embeddings = nn.Embedding(
+            codebook_size * num_codebooks, hidden_size
+        )
+
         self.start_layer = 0
         self.end_layer = num_layers
         self.layers = make_layers(
@@ -265,18 +293,23 @@ class S2ProSGLangTextModel(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: Optional[Tensor] = None,
     ) -> LogitsProcessorOutput:
-        """Forward pass. Returns LogitsProcessorOutput with hidden_states."""
-        # Check forward_batch.input_embeds as fallback (decode mode doesn't
-        # pass input_embeds kwarg but we set it on the batch)
-        if (
-            input_embeds is None
-            and hasattr(forward_batch, "input_embeds")
+        """Forward pass with fish-style inline VQ embedding.
+
+        When ``input_ids`` is 2-D ``[N, num_codebooks+1]``, column 0 holds
+        semantic token IDs and columns 1..K hold raw codebook indices.
+        VQ embeddings are computed inline and added to the text embedding
+        at positions where the semantic ID falls within the semantic token
+        range.  This replaces the old external ``input_embeds`` injection.
+        """
+        if input_ids.dim() == 2:
+            hidden_states = self._embed_with_codebooks(input_ids)
+        elif input_embeds is not None:
+            hidden_states = input_embeds
+        elif (
+            hasattr(forward_batch, "input_embeds")
             and forward_batch.input_embeds is not None
         ):
-            input_embeds = forward_batch.input_embeds
-
-        if input_embeds is not None:
-            hidden_states = input_embeds
+            hidden_states = forward_batch.input_embeds
         else:
             hidden_states = self.embed_tokens(input_ids)
 
@@ -305,6 +338,35 @@ class S2ProSGLangTextModel(nn.Module):
             hidden_states=hidden_states,
         )
 
+    def _embed_with_codebooks(self, input_ids: Tensor) -> Tensor:
+        """Compute hidden states from 2-D input_ids ``[N, K+1]``.
+
+        Column 0 = semantic token IDs, columns 1..K = raw codebook indices.
+        At VQ positions (semantic ID in ``[semantic_begin, semantic_end]``),
+        codebook embeddings are summed and added to the text embedding,
+        then scaled by ``1/sqrt(num_codebooks+1)``.
+        """
+        text_embeds = self.embed_tokens(input_ids[:, 0])
+
+        vq_masks = (input_ids[:, 0] >= self.semantic_begin_id) & (
+            input_ids[:, 0] <= self.semantic_end_id
+        )
+        if vq_masks.any():
+            embeds = []
+            for i in range(self.num_codebooks):
+                cb_ids = input_ids[:, i + 1] + i * self.codebook_size
+                embeds.append(self.codebook_embeddings(cb_ids))
+            vq_sum = torch.stack(embeds, dim=1).sum(dim=1)
+            vq_sum[~vq_masks] = 0
+            text_embeds = text_embeds + vq_sum
+            vq_expanded = vq_masks.unsqueeze(-1).expand_as(text_embeds)
+            text_embeds = torch.where(
+                vq_expanded,
+                text_embeds / math.sqrt(self.num_codebooks + 1),
+                text_embeds,
+            )
+        return text_embeds
+
     def get_embed_tokens(self):
         return self.embed_tokens
 
@@ -323,17 +385,28 @@ class S2ProSGLangTextModel(nn.Module):
             text_model.model.layers.N.feed_forward.w3.weight   → gate_up_proj (shard 1)
             text_model.model.layers.N.feed_forward.w2.weight   → down_proj
             text_model.model.norm.weight
+            audio_decoder.codebook_embeddings.weight           → codebook_embeddings
         """
         params_dict = dict(self.named_parameters())
 
         for name, loaded_weight in weights:
+            # Load audio_decoder.codebook_embeddings into text model
+            if name == "audio_decoder.codebook_embeddings.weight":
+                param = params_dict.get("codebook_embeddings.weight")
+                if param is not None:
+                    _default_weight_loader(param, loaded_weight)
+                    logger.info(
+                        "Loaded codebook_embeddings from audio_decoder (%s)",
+                        list(loaded_weight.shape),
+                    )
+                continue
+
             # Strip text_model.model. prefix
             if name.startswith("text_model.model."):
                 name = name[len("text_model.model.") :]
             elif name.startswith("text_model."):
                 name = name[len("text_model.") :]
             else:
-                # Skip non-text-model weights (audio_decoder, etc.)
                 continue
 
             # Remap checkpoint names to SGLang model names

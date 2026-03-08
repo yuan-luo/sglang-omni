@@ -139,8 +139,19 @@ class S2ProTokenizerAdapter:
 
         vq_parts_list = encoded.vq_parts  # list of [num_codebooks, T_i]
 
+        # Build fish-style input_values [K+1, seq_len] with codebook IDs
+        tokens = encoded.tokens
+        values = torch.zeros((num_codebooks + 1, len(tokens)), dtype=torch.int)
+        values[0] = tokens
+        if vq_parts_list and len(vq_parts_list) > 0:
+            vq_parts_cat = torch.cat(vq_parts_list, dim=1)  # [K, total_vq]
+            vq_mask = encoded.vq_mask_tokens
+            values[0, vq_mask] = vq_parts_cat[0] + self.semantic_begin_id
+            values[1:, vq_mask] = vq_parts_cat
+
         return {
-            "input_ids": encoded.tokens,
+            "input_ids": values[0],
+            "input_values": values,
             "vq_mask_tokens": encoded.vq_mask_tokens,
             "vq_parts": vq_parts_list,
         }
