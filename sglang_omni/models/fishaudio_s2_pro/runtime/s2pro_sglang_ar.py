@@ -143,11 +143,13 @@ class S2ProFastGraphRunner:
         *,
         max_bs: int = 64,
         hidden_dim: int = 1024,
+        top_k: int = 30,
         capture_bs: list[int] | None = None,
         dtype: torch.dtype = torch.bfloat16,
         device: str = "cuda",
     ) -> None:
         self._codebook_fn = codebook_fn
+        self._top_k = top_k
         self._graphs: dict[int, torch.cuda.CUDAGraph] = {}
         self._output_buffers: dict[int, Tensor] = {}
         self._graph_pool: Any = None
@@ -162,7 +164,6 @@ class S2ProFastGraphRunner:
             self._sem_tok_buf = torch.zeros((self._max_bs, 1), dtype=torch.int32)
             self._temp_buf = torch.full((self._max_bs, 1), 0.7, dtype=dtype)
             self._top_p_buf = torch.full((self._max_bs, 1), 0.7, dtype=dtype)
-            self._top_k_buf = torch.full((self._max_bs, 1), 30, dtype=torch.int64)
 
     # -- capture --
 
@@ -182,10 +183,9 @@ class S2ProFastGraphRunner:
         s = self._sem_tok_buf[:bs]
         t = self._temp_buf[:bs]
         p = self._top_p_buf[:bs]
-        k = self._top_k_buf[:bs]
 
         def run():
-            return self._codebook_fn(h, s, t, p, k)
+            return self._codebook_fn(h, s, t, p, self._top_k)
 
         for _ in range(2):
             torch.cuda.synchronize()
@@ -211,7 +211,6 @@ class S2ProFastGraphRunner:
         semantic_tokens: Tensor,
         temperature: Tensor,
         top_p: Tensor,
-        top_k: Tensor,
     ) -> Tensor:
         raw_bs = hidden_states.shape[0]
         idx = bisect.bisect_left(self._capture_bs, raw_bs)
@@ -225,7 +224,6 @@ class S2ProFastGraphRunner:
         self._sem_tok_buf[:raw_bs].copy_(semantic_tokens)
         self._temp_buf[:raw_bs].copy_(temperature)
         self._top_p_buf[:raw_bs].copy_(top_p)
-        self._top_k_buf[:raw_bs].copy_(top_k)
 
         self._graphs[bs].replay()
 
@@ -296,18 +294,20 @@ class S2ProSGLangOutputProcessor:
             self._codebook_fn = self._codebook_fn_eager
 
         if use_cuda_graph:
-            hidden_dim = getattr(audio_decoder, "project_in_dim", None)
+            hidden_dim = getattr(
+                getattr(audio_decoder, "config", None), "text_dim", None
+            )
             if hidden_dim is None:
                 for p in audio_decoder.project_in.parameters():
                     hidden_dim = p.shape[1]
                     break
             if hidden_dim is None:
-                hidden_dim = 1024
-            cb_fn = self._codebook_fn
+                hidden_dim = 2560
             self._fast_graph_runner = S2ProFastGraphRunner(
-                codebook_fn=cb_fn,
+                codebook_fn=self._codebook_fn_eager,
                 max_bs=max_batch_size,
                 hidden_dim=hidden_dim,
+                top_k=top_k,
             )
             self._fast_graph_runner.capture()
 
@@ -464,17 +464,13 @@ class S2ProSGLangOutputProcessor:
         )  # [bs, 1]
 
         # Batch codebook generation through audio decoder
-        top_k_t = torch.tensor([[top_k]], device=device, dtype=torch.int64).expand(
-            bs, 1
-        )
-
         if self._fast_graph_runner is not None and self._fast_graph_runner.can_run(bs):
             codes = self._fast_graph_runner.replay(
-                batch_hidden, semantic_tokens, temp_t, top_p_t, top_k_t
+                batch_hidden, semantic_tokens, temp_t, top_p_t
             )
         else:
             cb_fn = self._codebook_fn if bs == 1 else self._codebook_fn_eager
-            codes = cb_fn(batch_hidden, semantic_tokens, temp_t, top_p_t, top_k_t)
+            codes = cb_fn(batch_hidden, semantic_tokens, temp_t, top_p_t, top_k)
 
         return codes
 
