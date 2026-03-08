@@ -85,6 +85,7 @@ def create_s2pro_sglang_engine(
     ras_temperature: float = 1.5,
     ras_top_p: float = 0.95,
     use_torch_compile: bool = True,
+    use_cuda_graph: bool = False,
     max_batch_size: int = 64,
 ) -> OmniEngine:
     """Create a paged-attention S2-Pro engine using SGLang backend."""
@@ -173,6 +174,8 @@ def create_s2pro_sglang_engine(
         ras_temperature=ras_temperature,
         ras_top_p=ras_top_p,
         use_torch_compile=use_torch_compile,
+        use_cuda_graph=use_cuda_graph,
+        max_batch_size=max_batch_size,
     )
     iteration_ctrl = S2ProSGLangIterationController(
         tree_cache=tree_cache,
