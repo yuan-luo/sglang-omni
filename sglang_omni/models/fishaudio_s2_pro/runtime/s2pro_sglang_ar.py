@@ -13,6 +13,7 @@ single batched forward pass.
 
 from __future__ import annotations
 
+import bisect
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -125,6 +126,113 @@ def _codebook_loop_impl(
 
 
 # ---------------------------------------------------------------------------
+# CUDA Graph runner for fast-layer (codebook loop)
+# ---------------------------------------------------------------------------
+
+
+class S2ProFastGraphRunner:
+    """CUDA graph capture / replay for the audio decoder codebook loop.
+
+    Pre-captures ``_codebook_loop_impl`` at several fixed batch sizes so that
+    replay avoids per-kernel launch overhead during decode.
+    """
+
+    def __init__(
+        self,
+        codebook_fn: Any,
+        *,
+        max_bs: int = 64,
+        hidden_dim: int = 1024,
+        capture_bs: list[int] | None = None,
+        dtype: torch.dtype = torch.bfloat16,
+        device: str = "cuda",
+    ) -> None:
+        self._codebook_fn = codebook_fn
+        self._graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self._output_buffers: dict[int, Tensor] = {}
+        self._graph_pool: Any = None
+
+        if capture_bs is None:
+            capture_bs = [1, 2, 4, 8, 16, 32, 64]
+        self._capture_bs = [b for b in capture_bs if b <= max_bs]
+        self._max_bs = max(self._capture_bs) if self._capture_bs else 1
+
+        with torch.device(device):
+            self._hidden_buf = torch.zeros((self._max_bs, 1, hidden_dim), dtype=dtype)
+            self._sem_tok_buf = torch.zeros((self._max_bs, 1), dtype=torch.int32)
+            self._temp_buf = torch.full((self._max_bs, 1), 0.7, dtype=dtype)
+            self._top_p_buf = torch.full((self._max_bs, 1), 0.7, dtype=dtype)
+            self._top_k_buf = torch.full((self._max_bs, 1), 30, dtype=torch.int64)
+
+    # -- capture --
+
+    def capture(self) -> None:
+        logger.info(
+            "Capturing codebook CUDA graphs for batch sizes %s ...",
+            self._capture_bs,
+        )
+        for bs in self._capture_bs:
+            graph, out = self._capture_one(bs)
+            self._graphs[bs] = graph
+            self._output_buffers[bs] = out
+        logger.info("Codebook CUDA graph capture done")
+
+    def _capture_one(self, bs: int):
+        h = self._hidden_buf[:bs]
+        s = self._sem_tok_buf[:bs]
+        t = self._temp_buf[:bs]
+        p = self._top_p_buf[:bs]
+        k = self._top_k_buf[:bs]
+
+        def run():
+            return self._codebook_fn(h, s, t, p, k)
+
+        for _ in range(2):
+            torch.cuda.synchronize()
+            run()
+            torch.cuda.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, pool=self._graph_pool):
+            out = run()
+
+        torch.cuda.synchronize()
+        self._graph_pool = graph.pool()
+        return graph, out
+
+    # -- replay --
+
+    def can_run(self, bs: int) -> bool:
+        return bs <= self._max_bs and len(self._graphs) > 0
+
+    def replay(
+        self,
+        hidden_states: Tensor,
+        semantic_tokens: Tensor,
+        temperature: Tensor,
+        top_p: Tensor,
+        top_k: Tensor,
+    ) -> Tensor:
+        raw_bs = hidden_states.shape[0]
+        idx = bisect.bisect_left(self._capture_bs, raw_bs)
+        bs = self._capture_bs[idx]
+
+        if bs != raw_bs:
+            self._hidden_buf.zero_()
+            self._sem_tok_buf.zero_()
+
+        self._hidden_buf[:raw_bs].copy_(hidden_states)
+        self._sem_tok_buf[:raw_bs].copy_(semantic_tokens)
+        self._temp_buf[:raw_bs].copy_(temperature)
+        self._top_p_buf[:raw_bs].copy_(top_p)
+        self._top_k_buf[:raw_bs].copy_(top_k)
+
+        self._graphs[bs].replay()
+
+        return self._output_buffers[bs][:, :raw_bs].clone()
+
+
+# ---------------------------------------------------------------------------
 # OutputProcessor: two-stage sampling (semantic + codebooks)
 # ---------------------------------------------------------------------------
 
@@ -152,6 +260,8 @@ class S2ProSGLangOutputProcessor:
         ras_temperature: float = 1.5,
         ras_top_p: float = 0.95,
         use_torch_compile: bool = False,
+        use_cuda_graph: bool = False,
+        max_batch_size: int = 64,
     ) -> None:
         self._audio_decoder = audio_decoder
         self._num_codebooks = num_codebooks
@@ -164,6 +274,7 @@ class S2ProSGLangOutputProcessor:
         self._ras_temperature = ras_temperature
         self._ras_top_p = ras_top_p
         self._semantic_bias: Tensor | None = None
+        self._fast_graph_runner: S2ProFastGraphRunner | None = None
 
         import functools
 
@@ -176,10 +287,29 @@ class S2ProSGLangOutputProcessor:
         )
         if use_torch_compile:
             self._codebook_fn = torch.compile(
-                self._codebook_fn_eager, mode="max-autotune", fullgraph=True
+                self._codebook_fn_eager,
+                mode="max-autotune-no-cudagraphs",
+                dynamic=False,
+                fullgraph=True,
             )
         else:
             self._codebook_fn = self._codebook_fn_eager
+
+        if use_cuda_graph:
+            hidden_dim = getattr(audio_decoder, "project_in_dim", None)
+            if hidden_dim is None:
+                for p in audio_decoder.project_in.parameters():
+                    hidden_dim = p.shape[1]
+                    break
+            if hidden_dim is None:
+                hidden_dim = 1024
+            cb_fn = self._codebook_fn
+            self._fast_graph_runner = S2ProFastGraphRunner(
+                codebook_fn=cb_fn,
+                max_bs=max_batch_size,
+                hidden_dim=hidden_dim,
+            )
+            self._fast_graph_runner.capture()
 
     def _get_semantic_bias(self, logits: Tensor) -> Tensor:
         if self._semantic_bias is None:
@@ -334,11 +464,17 @@ class S2ProSGLangOutputProcessor:
         )  # [bs, 1]
 
         # Batch codebook generation through audio decoder
-        # Use eager (non-compiled) path for batch to avoid shape recompilation
-        cb_fn = self._codebook_fn if bs == 1 else self._codebook_fn_eager
-        codes = cb_fn(
-            batch_hidden, semantic_tokens, temp_t, top_p_t, top_k
-        )  # [num_codebooks+1, bs]
+        top_k_t = torch.tensor([[top_k]], device=device, dtype=torch.int64).expand(
+            bs, 1
+        )
+
+        if self._fast_graph_runner is not None and self._fast_graph_runner.can_run(bs):
+            codes = self._fast_graph_runner.replay(
+                batch_hidden, semantic_tokens, temp_t, top_p_t, top_k_t
+            )
+        else:
+            cb_fn = self._codebook_fn if bs == 1 else self._codebook_fn_eager
+            codes = cb_fn(batch_hidden, semantic_tokens, temp_t, top_p_t, top_k_t)
 
         return codes
 
