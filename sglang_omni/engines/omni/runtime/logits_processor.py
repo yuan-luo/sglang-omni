@@ -12,10 +12,6 @@ from typing import Any, Protocol, runtime_checkable
 
 import torch
 
-# ---------------------------------------------------------------------------
-# Sampling context
-# ---------------------------------------------------------------------------
-
 
 @dataclass
 class SamplingContext:
@@ -30,11 +26,6 @@ class SamplingContext:
     previous_tokens: torch.Tensor | None = None
     step: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# Protocol
-# ---------------------------------------------------------------------------
 
 
 @runtime_checkable
@@ -53,11 +44,6 @@ class LogitsProcessor(Protocol):
             context: per-request sampling state.
         """
         ...
-
-
-# ---------------------------------------------------------------------------
-# Pipeline
-# ---------------------------------------------------------------------------
 
 
 class LogitsProcessorPipeline:
@@ -80,11 +66,6 @@ class LogitsProcessorPipeline:
         for proc in self._processors:
             logits = proc(logits, context)
         return logits
-
-
-# ---------------------------------------------------------------------------
-# Built-in processors
-# ---------------------------------------------------------------------------
 
 
 class TemperatureProcessor:
@@ -169,11 +150,6 @@ class FrequencyPenaltyProcessor:
         )
         logits = logits - penalty * counts
         return logits
-
-
-# ---------------------------------------------------------------------------
-# Convenience factory
-# ---------------------------------------------------------------------------
 
 
 def default_logits_pipeline() -> LogitsProcessorPipeline:

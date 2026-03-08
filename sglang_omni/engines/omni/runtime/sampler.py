@@ -15,10 +15,6 @@ import torch
 
 from .logits_processor import SamplingContext
 
-# ---------------------------------------------------------------------------
-# Data
-# ---------------------------------------------------------------------------
-
 
 @dataclass
 class SamplerOutput:
@@ -26,11 +22,6 @@ class SamplerOutput:
 
     token_ids: torch.Tensor  # [batch] or [batch, num_codebooks+1]
     logprobs: torch.Tensor | None = None
-
-
-# ---------------------------------------------------------------------------
-# Protocol
-# ---------------------------------------------------------------------------
 
 
 @runtime_checkable
@@ -42,11 +33,6 @@ class Sampler(Protocol):
         logits: torch.Tensor,
         context: SamplingContext,
     ) -> SamplerOutput: ...
-
-
-# ---------------------------------------------------------------------------
-# Implementations
-# ---------------------------------------------------------------------------
 
 
 class ArgmaxSampler:
