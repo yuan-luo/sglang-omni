@@ -240,6 +240,93 @@ CUDA_VISIBLE_DEVICES=0 python benchmarks/profile_s2pro_sglang.py \
 | compile + CUDA graph (P1 v2) | ~60 (BS=1), near-linear batch scaling | ~1% | To verify |
 | No compile (baseline) | ~26 | ~1% | Reference |
 
+## Fish-style 2-D `input_ids` Architecture
+
+> Date: 2026-03-08
+> Commit: feat(s2pro): fish-style 2-D input_ids with inline VQ embedding
+
+### Problem: `input_embeds` injection blocks text model CUDA graph
+
+The previous design injected precomputed **float** `input_embeds` into the model's forward pass:
+- **Prefill**: Looked up VQ-masked positions, called `audio_decoder.embed_text_dim()`, scattered results into `text_embeds`
+- **Decode**: Called `audio_decoder.embed_one_token()` per semantic token, scattered into `text_embeds`
+
+This required `model_worker_batch.input_embeds` (a dynamic float tensor) which is **incompatible with CUDA graph capture** — CUDA graphs need static tensor shapes and integer inputs for embedding lookups.
+
+### Solution: Move VQ embedding inside the model
+
+Adopted the "fish-style" architecture from FishAudio's official implementation:
+
+1. **2-D integer `input_ids [N, K+1]`**: Column 0 = semantic token ID, columns 1..K = raw codebook indices
+2. **Inline `_embed_with_codebooks()`** in the text model's forward:
+   - `text_embeds = embed_tokens(input_ids[:, 0])`
+   - At VQ positions (semantic ID in `[begin, end]`): sum K codebook embeddings + text embedding, scale by `1/sqrt(K+1)`
+3. **`codebook_embeddings`** weight (`nn.Embedding(codebook_size * K, hidden_size)`) loaded from `audio_decoder.codebook_embeddings.weight`
+
+### Data flow
+
+```
+Tokenizer (build_prompt)
+  → input_values [K+1, seq_len]    # new: multi-codebook tensor
+  → input_ids [seq_len]            # kept: 1-D semantic IDs for SGLang
+
+S2ProState / engine_io
+  → transpose to [seq_len, K+1]
+
+S2ProSGLangModelRunner._build_2d_input_ids()
+  Prefill: slice each request's input_values by prefix_len/extend_input_len
+  Decode:  semantic_token || _last_codebook_values  →  [bs, K+1]
+
+Text model forward()
+  input_ids.dim() == 2  →  _embed_with_codebooks()
+  input_ids.dim() == 1  →  embed_tokens() (fallback)
+```
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `sglang_model.py` | Added `codebook_embeddings`, `_embed_with_codebooks()`, 2-D `input_ids` handling in `forward()`, weight loading for `audio_decoder.codebook_embeddings` |
+| `tokenizer.py` | `build_prompt()` now returns `input_values [K+1, seq_len]` |
+| `io.py` | Added `input_values` field to `S2ProState`, serialization support |
+| `pipeline/engine_io.py` | Transpose `input_values` from `[K+1, seq]` to `[seq, K+1]` for request data |
+| `pipeline/stages.py` | Pass `input_values` from prompt to `S2ProState` |
+| `runtime/s2pro_sglang_ar.py` | Added `input_values` to `S2ProSGLangRequestData`, replaced `_inject_vq_embeds()` with `_build_2d_input_ids()` |
+| `benchmarks/profile_s2pro_sglang.py` | Pass `input_values` to request data |
+
+### Results
+
+**Quality** (50 samples, seed-tts-eval EN):
+
+| Mode | WER (mean) | WER (median) |
+|------|-----------|-------------|
+| no-compile (fish-style) | 0.99% | 0.0% |
+| compile (fish-style) | 1.10% | 0.0% |
+
+No quality regression — identical to pre-fish-style results.
+
+**Performance** (compile mode, fish-style):
+
+| Metric | BS=1 | BS=2 | BS=4 | BS=8 |
+|--------|------|------|------|------|
+| tok/s (per-req) | 52.6 | 28.3 | 27.0 | 25.6 |
+| tok/s (agg) | 52.6 | 28.5 | 27.2 | 25.8 |
+| RTF | 0.409 | 0.771 | 0.802 | 0.841 |
+| Latency | 1.58s | 2.95s | 3.11s | 3.28s |
+| TTFT | 25.6ms | 41.8ms | 42.5ms | 43.9ms |
+| TTFB | 207.7ms | 395.5ms | 395.0ms | 399.2ms |
+
+Comparison with previous no-compile (fish-style) at BS=4/8:
+
+| | BS=4 no-compile | BS=4 compile | BS=8 no-compile | BS=8 compile |
+|---|---|---|---|---|
+| tok/s | 26.0 | 27.0 (+4%) | 24.3 | 25.6 (+5%) |
+| RTF | 0.830 | 0.802 | 0.889 | 0.841 |
+
+Performance is equivalent or slightly better. The core value is architectural: all model inputs are now integer tensors, unblocking text model CUDA graph capture.
+
+---
+
 ## Key Design Decisions
 
 1. **topk vs sort for sampling**: `topk` is O(V + k log k) vs sort's O(V log V). For codebook V=4096, k=30, topk is ~5x fewer FLOPs. Both are CUDA-graph-safe; the old sort approach was chosen for "safety" but was unnecessarily conservative.
@@ -247,3 +334,13 @@ CUDA_VISIBLE_DEVICES=0 python benchmarks/profile_s2pro_sglang.py \
 2. **Eager fn for CUDA graph capture**: torch.compile + CUDA graph is redundant. CUDA graphs already eliminate kernel launch overhead. Using eager avoids Dynamo's fake tensor tracing issues with complex model internals (e.g., `project_in` shape changes).
 
 3. **top_k as int constant**: Since all requests use the same top_k value and `torch.topk` requires a Python int, baking it as a constant simplifies the code and avoids `.item()` sync issues in compiled/CUDA-graph paths.
+
+4. **Fish-style 2-D `input_ids`**: Moving VQ embedding logic inside the model's forward pass keeps all inputs as integer tensors. This is the prerequisite for text model CUDA graph capture — the biggest remaining performance gap vs FishAudio's official ~120 tok/s at BS=1.
+
+## Next Steps
+
+| Task | Difficulty | Expected Impact |
+|------|-----------|----------------|
+| Text model CUDA graph | Medium-Hard | BS=1 tok/s: 52 → ~100+ (biggest win) |
+| Overlap text/audio decode scheduling | Hard | Better batch utilization |
+| Profile-guided torch.compile tuning | Medium | Compile-mode throughput |
