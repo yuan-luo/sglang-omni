@@ -92,6 +92,7 @@ def create_sglang_engine(
     max_new_tokens,
     top_k,
     use_torch_compile=False,
+    use_cuda_graph=False,
     max_batch_size=64,
 ):
     from sglang.srt.server_args import ServerArgs
@@ -121,6 +122,7 @@ def create_sglang_engine(
         max_new_tokens=max_new_tokens,
         top_k=top_k,
         use_torch_compile=use_torch_compile,
+        use_cuda_graph=use_cuda_graph,
         max_batch_size=max_batch_size,
     )
 
@@ -479,7 +481,13 @@ async def run_profiling(args):
 
     # Create engine
     use_compile = not args.no_compile
-    logger.info("Creating SGLang engine (compile=%s)...", use_compile)
+    max_bs = args.max_batch_size
+    logger.info(
+        "Creating SGLang engine (compile=%s, cuda_graph=%s, max_bs=%d)...",
+        use_compile,
+        args.enable_cuda_graph,
+        max_bs,
+    )
     engine = create_sglang_engine(
         args.checkpoint,
         audio_decoder,
@@ -489,6 +497,8 @@ async def run_profiling(args):
         args.max_new_tokens,
         args.top_k,
         use_torch_compile=use_compile,
+        use_cuda_graph=args.enable_cuda_graph,
+        max_batch_size=max_bs,
     )
     await engine.start()
 
@@ -702,6 +712,17 @@ def parse_args():
         "--no-compile",
         action="store_true",
         help="Disable torch.compile on codebook loop (enabled by default)",
+    )
+    p.add_argument(
+        "--enable-cuda-graph",
+        action="store_true",
+        help="Capture CUDA graphs for the codebook loop (fast layer)",
+    )
+    p.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=64,
+        help="Max batch size for engine and CUDA graph capture",
     )
     p.add_argument(
         "--test-cache-hit", action="store_true", help="Test radix cache hit TTFB"
