@@ -41,38 +41,57 @@ python examples/run_fishaudio_s2pro_e2e.py \
 
 ## Benchmark Results (seed-tts-eval EN, 50 samples)
 
-### Performance (compile mode, fish-style 2-D input_ids)
+### Performance (text model CUDA graph, best config)
 
 | Metric | BS=1 | BS=2 | BS=4 | BS=8 |
 |---|---|---|---|---|
-| tok/s (per-req) | 52.6 | 28.3 | 27.0 | 25.6 |
-| tok/s (agg) | 52.6 | 28.5 | 27.2 | 25.8 |
-| RTF | 0.409 | 0.771 | 0.802 | 0.841 |
-| Latency (mean) | 1.58s | 2.95s | 3.11s | 3.28s |
-| TTFT (mean) | 25.6ms | 41.8ms | 42.5ms | 43.9ms |
-| TTFB (mean) | 207.7ms | 395.5ms | 395.0ms | 399.2ms |
+| tok/s (per-req) | **79.5** | 35.1 | 33.0 | 31.0 |
+| tok/s (agg) | 73.4 | 35.4 | 33.4 | 31.2 |
+| RTF | **0.301** | 0.624 | 0.659 | 0.696 |
+| Latency (mean) | 1.16s | 2.37s | 2.55s | 2.74s |
+| TTFB (mean) | 258ms | 336ms | 338ms | 342ms |
 
 ### Quality
 
 | Metric | Value |
 |---|---|
 | Samples evaluated | 50 |
+| WER (mean, text CUDA graph) | 1.61% |
 | WER (mean, compile) | 1.10% |
 | WER (mean, no-compile) | 0.99% |
 | WER (median) | 0.0% |
 | Samples >50% WER | 0 (0.0%) |
 
+### vs FishAudio Official (H200)
+
+| Metric | FishAudio Official (H200) | Ours (H100) | Gap |
+|---|---|---|---|
+| RTF (BS=1) | **0.195** | 0.301 | 1.54x |
+| TTFA | **~100 ms** | 258 ms | 2.6x |
+| Throughput (agg) | **3,000+ tok/s** | ~248 (BS=8) | 12x |
+| WER (EN) | **0.99%** | 1.61% | OK |
+
 ### Optimizations Applied
 
 | Optimization | Status | Impact |
 |---|---|---|
+| **Text model CUDA graph** | **Done** | **BS=1: 52 → 79.5 tok/s (+51%)** |
 | Fish-style 2-D `input_ids` | Done | Integer-only model inputs, CUDA graph ready |
 | topk + Gumbel-max sampling | Done | O(V log V) -> O(V + k log k), no CUDA sync |
 | CUDA graph for codebook loop | Done | Eliminates kernel launch overhead at BS>1 |
 | Continuous batching support | Done | Realistic load testing with Poisson arrivals |
 | RadixAttention prefix cache | Built-in | Shared ref audio -> TTFT speedup on cache hit |
 | torch.compile (max-autotune-no-cudagraphs) | Done | Avoids internal CUDA graph WER corruption |
-| Text model CUDA graph | Not yet | Next step: 2-D input_ids makes this feasible |
+
+### TODO
+
+| Priority | Task | Expected Impact |
+|---|---|---|
+| P0 | torch.compile inside text CUDA graph | BS=1: 79 → ~100+ tok/s |
+| P1 | Combined text+audio CUDA graph | TTFB: 258 → ~200ms |
+| P2 | Audio decoder batch parallelism | Batch scaling: BS=8 agg 248 → ~500+ tok/s |
+| P3 | Text/audio overlap scheduling | Hide codebook latency behind next text step |
+| P5 | Benchmark on H200 | Fair comparison (expected RTF ~0.21) |
 
 ## Running Benchmarks
 
@@ -120,6 +139,14 @@ CUDA_VISIBLE_DEVICES=0 python benchmarks/profile_s2pro_sglang.py \
     --output-dir results/s2pro_cudagraph \
     --max-samples 50 --batch-sizes 1,2,4,8 --enable-cuda-graph
 
+# Text model CUDA graph (best performance)
+CUDA_VISIBLE_DEVICES=0 python benchmarks/profile_s2pro_sglang.py \
+    --checkpoint $S2PRO_CKPT \
+    --testset $SEED_TTS/seedtts_testset/en/meta.lst \
+    --output-dir results/s2pro_text_cuda_graph \
+    --max-samples 50 --batch-sizes 1,2,4,8 \
+    --enable-text-cuda-graph --max-batch-size 16 --save-audio
+
 # No-compile mode (for comparison)
 CUDA_VISIBLE_DEVICES=0 python benchmarks/profile_s2pro_sglang.py \
     --checkpoint $S2PRO_CKPT \
@@ -136,6 +163,7 @@ CUDA_VISIBLE_DEVICES=0 python benchmarks/profile_s2pro_sglang.py \
 | `--request-rate <float>` | Poisson arrival rate (req/s). Default `inf` = burst mode |
 | `--test-shared-prefix` | Test RadixAttention prefix cache with shared ref audio |
 | `--enable-cuda-graph` | Enable CUDA graph capture for codebook loop |
+| `--enable-text-cuda-graph` | Enable CUDA graph capture for text model decode |
 | `--max-batch-size <int>` | Max batch size for CUDA graph capture (default 64) |
 | `--no-compile` | Disable torch.compile |
 | `--save-audio` | Save generated audio files for WER evaluation |

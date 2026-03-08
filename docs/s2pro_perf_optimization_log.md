@@ -337,10 +337,144 @@ Performance is equivalent or slightly better. The core value is architectural: a
 
 4. **Fish-style 2-D `input_ids`**: Moving VQ embedding logic inside the model's forward pass keeps all inputs as integer tensors. This is the prerequisite for text model CUDA graph capture — the biggest remaining performance gap vs FishAudio's official ~120 tok/s at BS=1.
 
-## Next Steps
+## Text Model CUDA Graph
 
-| Task | Difficulty | Expected Impact |
-|------|-----------|----------------|
-| Text model CUDA graph | Medium-Hard | BS=1 tok/s: 52 → ~100+ (biggest win) |
-| Overlap text/audio decode scheduling | Hard | Better batch utilization |
-| Profile-guided torch.compile tuning | Medium | Compile-mode throughput |
+> Date: 2026-03-08
+> Commit: feat(s2pro): CUDA graph capture/replay for text model decode
+
+### Problem: High CPU-side kernel launch overhead during decode
+
+Each text model decode step (36 transformer layers with RadixAttention) launches hundreds of CUDA kernels individually. CPU-side launch overhead dominates at small batch sizes, capping throughput at ~52 tok/s (BS=1).
+
+### Solution: Custom `S2ProTextCudaGraphRunner`
+
+SGLang's built-in `CudaGraphRunner` expects 1-D `input_ids` (`GraphInputBuffers.input_ids` is `[max_num_token]`). Our fish-style architecture uses 2-D `input_ids [bs, K+1]`. A custom graph runner was implemented:
+
+1. **Static buffers**: `input_ids [max_bs, K+1]`, `req_pool_indices [max_bs]`, `seq_lens [max_bs]`, `out_cache_loc [max_bs]`, `seq_lens_cpu [max_bs]`
+2. **Capture**: For each batch size, build `ForwardBatch` with static buffers, run warmup, capture CUDA graph
+3. **Replay**: Copy live data into static buffers, init attention metadata, `graph.replay()`, slice output to actual batch size
+
+Key implementation details:
+- **Positions computed inside graph**: `positions = (seq_lens - 1).clamp(min=0).to(int64)` is part of the captured computation so it updates when `seq_lens` changes during replay
+- **Branchless `_embed_with_codebooks`**: Removed `vq_masks.any()` (CPU-GPU sync) and float-typed scale computation that caused `rmsnorm` dtype errors; uses `vq_float * (inv_scale - 1.0) + 1.0` to stay in bf16
+- **FlashInfer compatibility**: Passes `seq_lens_cpu` to `init_forward_metadata_replay_cuda_graph` (required by FlashInfer backend, which SGLang auto-selects on H100)
+- **Memory**: `mem_fraction_static` reduced from 0.85 to 0.75 when text CUDA graph is enabled to leave headroom for graph memory pools
+
+### Bugs fixed during implementation
+
+1. **`vq_masks.any()` → CPU-GPU sync during capture**: Removed branch; always compute VQ embeddings with masking
+2. **Float32 dtype contamination**: `bool_tensor * python_float` produces float32, breaking `rmsnorm`. Fixed by casting mask to `text_embeds.dtype` first
+3. **Static positions**: Positions computed outside `run_once()` were baked at capture time, causing all decode steps to use the same position → model never generated EOS (2048 tokens every request). Fixed by computing positions inside `run_once()` from the static `seq_lens` buffer
+4. **Missing `seq_lens_cpu`**: FlashInfer backend (auto-selected on H100) requires `seq_lens_cpu` in `init_forward_metadata_replay_cuda_graph`. Added pre-allocated CPU buffer
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `runtime/s2pro_sglang_ar.py` | New `S2ProTextCudaGraphRunner` class (capture/replay), `S2ProSGLangModelRunner` uses it for decode steps |
+| `sglang_model.py` | `_embed_with_codebooks` made branchless and bf16-safe |
+| `factory.py` | `use_text_cuda_graph` flag, instantiates and captures graph runner |
+| `benchmarks/profile_s2pro_sglang.py` | `--enable-text-cuda-graph` CLI flag, reduced `mem_fraction_static` for graph mode |
+
+### Results
+
+**Quality** (50 samples, seed-tts-eval EN):
+
+| Mode | WER (mean) | WER (median) |
+|------|-----------|-------------|
+| text CUDA graph | 1.61% | 0.0% |
+
+Quality maintained — no samples >50% WER.
+
+**Performance** (text CUDA graph, no compile for audio decoder):
+
+| Metric | BS=1 | BS=2 | BS=4 | BS=8 |
+|--------|------|------|------|------|
+| tok/s (per-req) | **79.5** | 35.1 | 33.0 | 31.0 |
+| tok/s (agg) | 73.4 | 35.4 | 33.4 | 31.2 |
+| RTF | **0.301** | 0.624 | 0.659 | 0.696 |
+| Latency | 1.16s | 2.37s | 2.55s | 2.74s |
+| TTFT | 136ms | 42.8ms | 44.2ms | 45.9ms |
+| TTFB | 258ms | 336ms | 338ms | 342ms |
+
+**Comparison** (fish-style compile baseline → text CUDA graph):
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| BS=1 tok/s | 52.6 | **79.5** | **+51%** |
+| BS=2 tok/s | 28.5 | 35.1 | +23% |
+| BS=4 tok/s | 27.2 | 33.0 | +21% |
+| BS=8 tok/s | 25.8 | 31.0 | +20% |
+| BS=1 RTF | 0.409 | **0.301** | **-26%** |
+| BS=8 RTF | 0.841 | 0.696 | -17% |
+
+### Test command
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python benchmarks/profile_s2pro_sglang.py \
+    --checkpoint $S2PRO_CKPT \
+    --testset $SEED_TTS/seedtts_testset/en/meta.lst \
+    --output-dir results/s2pro_text_cuda_graph \
+    --max-samples 50 --batch-sizes 1,2,4,8 \
+    --enable-text-cuda-graph --max-batch-size 16 --save-audio
+```
+
+---
+
+## Gap Analysis: vs FishAudio Official (H200)
+
+> FishAudio S2 official numbers (single H200 GPU):
+> - RTF: 0.195
+> - TTFA: ~100 ms
+> - Throughput: 3,000+ acoustic tokens/s (RTF < 0.5)
+> - WER (EN): 0.99%
+
+### Current comparison
+
+| Metric | FishAudio Official (H200) | Ours (H100, text CUDA graph) | Gap |
+|--------|--------------------------|------------------------------|-----|
+| RTF (BS=1) | **0.195** | 0.301 | 1.54x slower |
+| TTFA / TTFB | **~100 ms** | 258 ms | 2.6x slower |
+| Throughput (agg) | **3,000+ tok/s** | 73.4 (BS=1) / ~248 (BS=8) | 12x gap |
+| WER (EN) | **0.99%** | 1.61% | Slightly higher |
+
+### Optimization progress
+
+| Stage | BS=1 tok/s | BS=1 RTF | Δ vs baseline |
+|-------|-----------|----------|---------------|
+| Baseline (eager, no opt) | ~26 | ~0.83 | - |
+| P0: compile + topk sampling | ~52 | ~0.41 | +100% |
+| Fish-style 2-D input_ids | ~52.6 | ~0.41 | Architecture prep |
+| **Text model CUDA graph** | **79.5** | **0.301** | **+206%** |
+| FishAudio official target | ~120+ | 0.195 | ~50% gap remaining |
+
+### Root causes of remaining gaps
+
+**1. Batch scaling degradation (biggest problem)**
+
+BS=1 → BS=2: per-request tok/s drops from 79.5 to 35.1 (-56%). This means BS=2 aggregate (70.2) is actually *lower* than BS=1 (73.4). The audio decoder codebook loop runs serially across all 10 codebooks per batch, and its cost grows linearly with batch size. FishAudio achieves 3000+ tok/s at RTF < 0.5 under high concurrency, implying far better batch scaling.
+
+**2. torch.compile disabled inside text CUDA graph**
+
+`patch_model` calls `_to_torch()` which converts weights to fp32. The custom `fused_inplace_qknorm` kernel only supports bf16/fp16, causing a crash. FishAudio likely uses a compatible qk_norm or skips `_to_torch()`. Without compile, we miss kernel fusion optimizations (estimated ~20-30% gap).
+
+**3. TTFB/TTFA gap (258ms vs 100ms)**
+
+The first audio chunk requires: prefill → semantic token → 10 codebook tokens → DAC decode. The codebook loop alone takes ~120ms. FishAudio may overlap prefill with codebook generation, or use a faster codebook decoder path.
+
+**4. Hardware difference (H200 vs H100)**
+
+H200 memory bandwidth: 4.8 TB/s vs H100: 3.35 TB/s (+43%). For memory-bound decode, this accounts for ~30% of the RTF gap. Adjusting for hardware, our effective RTF would be ~0.21 on H200, closer to their 0.195.
+
+---
+
+## TODO: Next Optimizations
+
+| Priority | Task | Difficulty | Expected Impact | Details |
+|----------|------|-----------|----------------|---------|
+| **P0** | torch.compile inside text CUDA graph | Medium | BS=1: 79 → ~100+ tok/s | Fix `fused_inplace_qknorm` fp32 issue or bypass `_to_torch()` dtype conversion |
+| **P1** | Combined text+audio CUDA graph | Medium | Reduce TTFB ~50ms, improve batch scaling | Capture codebook loop inside same graph as text model decode |
+| **P2** | Audio decoder batch parallelism | Hard | Better batch scaling (BS=8 agg: 248 → ~500+ tok/s) | Current serial codebook loop is the batch scaling bottleneck |
+| **P3** | Text/audio overlap scheduling | Hard | Hide codebook latency behind next text step | Pipeline text model step N+1 while audio decoder runs step N |
+| **P4** | Profile-guided compile tuning | Medium | ~10-15% kernel fusion gains | Tune `SGLANG_TORCH_COMPILE_MODE`, investigate `fullgraph=True` |
+| **P5** | Benchmark on H200 | Easy | Fair comparison with official numbers | H200 bandwidth advantage is ~43%, expected RTF ~0.21 |
