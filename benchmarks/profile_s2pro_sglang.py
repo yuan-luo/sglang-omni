@@ -163,6 +163,7 @@ def build_request_data(
         sample["text"], references=refs, num_codebooks=num_codebooks
     )
     input_ids = prompt["input_ids"]
+    input_values = prompt.get("input_values")
 
     sampling_params = SamplingParams(max_new_tokens=max_new_tokens, temperature=0.8)
     sampling_params.normalize(tokenizer)
@@ -179,12 +180,23 @@ def build_request_data(
         vocab_size=adapter._tok.vocab_size,
     )
 
+    # Transpose input_values from [K+1, seq_len] to [seq_len, K+1] for request data
+    iv_tensor = None
+    if input_values is not None:
+        if not isinstance(input_values, torch.Tensor):
+            input_values = torch.tensor(input_values, dtype=torch.long)
+        if input_values.shape[0] == num_codebooks + 1:
+            iv_tensor = input_values.T
+        else:
+            iv_tensor = input_values
+
     return S2ProSGLangRequestData(
         input_ids=(
             torch.tensor(input_ids_list, dtype=torch.long)
             if not isinstance(input_ids, torch.Tensor)
             else input_ids
         ),
+        input_values=iv_tensor,
         req=req,
         vq_mask_tokens=prompt["vq_mask_tokens"],
         vq_parts=prompt["vq_parts"],

@@ -55,7 +55,10 @@ class S2ProSGLangRequestData(SGLangARRequestData):
     two-stage decode (semantic token + codebook generation).
     """
 
-    # VQ embedding data for prefill
+    # Fish-style multi-codebook input [seq_len, K+1]
+    input_values: torch.Tensor | None = None
+
+    # Legacy VQ embedding data for prefill (kept for backward compat)
     vq_mask_tokens: torch.Tensor | None = None
     vq_parts: list[torch.Tensor] | None = None
 
@@ -557,9 +560,9 @@ class S2ProSGLangIterationController:
 class S2ProSGLangModelRunner:
     """Model runner that uses SGLang for text model and custom output processing.
 
-    Handles VQ embedding injection for both prefill and decode:
-    - Prefill: replaces VQ-masked positions with audio_decoder.embed_text_dim()
-    - Decode: uses audio_decoder.embed_one_token() for semantic tokens
+    Uses fish-style 2-D ``input_ids [N, K+1]`` so that VQ codebook
+    embeddings are computed inline inside the text model's forward pass
+    (integer inputs only — CUDA-graph friendly).
     """
 
     def __init__(
@@ -572,94 +575,60 @@ class S2ProSGLangModelRunner:
         self.output_processor = output_processor
         self.batch_planner = batch_planner
 
-    def _inject_vq_embeds(
+    def _build_2d_input_ids(
         self,
         model_worker_batch: Any,
         scheduler_output: SchedulerOutput,
         is_prefill: bool,
     ) -> None:
-        """Compute input_embeds with VQ injection, set on model_worker_batch."""
-        device = model_worker_batch.input_ids.device
-        audio_decoder = self.output_processor._audio_decoder
-        text_model = self.model_worker.model_runner.model
-        embed_tokens = text_model.get_embed_tokens()
+        """Build 2-D ``input_ids [N, K+1]`` from per-request data.
 
-        input_ids = model_worker_batch.input_ids
-        text_embeds = embed_tokens(input_ids)  # (num_tokens, dim)
+        * **Prefill**: slices each request's ``input_values [seq, K+1]``
+          according to ``prefix_len`` / ``extend_input_len`` and
+          concatenates across the batch.
+        * **Decode**: combines the 1-D semantic token with
+          ``_last_codebook_values`` from the previous step.
+        """
+        device = model_worker_batch.input_ids.device
+        num_codebooks = self.output_processor._num_codebooks
 
         if is_prefill:
-            # For each request in the batch, apply VQ embedding replacement
+            slices: list[Tensor] = []
             offset = 0
+            ids_1d = model_worker_batch.input_ids  # [total_tokens]
             for sched_req in scheduler_output.requests:
                 data: S2ProSGLangRequestData = sched_req.data
                 req_len = data.req.extend_input_len
+                prefix_len = len(data.req.prefix_indices)
 
-                if (
-                    data.vq_mask_tokens is not None
-                    and data.vq_parts is not None
-                    and len(data.vq_parts) > 0
-                ):
-                    vq_mask = data.vq_mask_tokens.to(device)
-                    if vq_mask.dim() == 2:
-                        vq_mask = vq_mask.squeeze(0)
-
-                    # Slice mask to current input window (chunked prefill)
-                    prefix_len = len(data.req.prefix_indices)
-                    mask_slice = vq_mask[prefix_len : prefix_len + req_len]
-
-                    # Flatten VQ parts: [T_i, num_codebooks] each
-                    parts = [p.to(device).T for p in data.vq_parts if p.dim() == 2]
-                    vq_parts_flat = torch.cat(parts, dim=0) if parts else None
-
-                    if vq_parts_flat is not None and mask_slice.any():
-                        vq_before = (
-                            vq_mask[:prefix_len].sum().item() if prefix_len > 0 else 0
-                        )
-                        num_vq_in_slice = mask_slice.sum().item()
-                        vq_slice = vq_parts_flat[
-                            vq_before : vq_before + num_vq_in_slice
-                        ]
-                        req_embeds = text_embeds[offset : offset + req_len]
-                        vq_embeds = audio_decoder.embed_text_dim(
-                            req_embeds.unsqueeze(0),
-                            vq_slice,
-                            mask_slice.unsqueeze(0),
-                        )
-                        mask_indices = mask_slice.nonzero(as_tuple=True)[0] + offset
-                        text_embeds[mask_indices] = vq_embeds.to(text_embeds.dtype)
+                if data.input_values is not None:
+                    iv = data.input_values.to(device)  # [seq_len, K+1]
+                    slices.append(iv[prefix_len : prefix_len + req_len])
+                else:
+                    chunk = ids_1d[offset : offset + req_len]
+                    pad = torch.zeros(
+                        req_len, num_codebooks, dtype=chunk.dtype, device=device
+                    )
+                    slices.append(torch.cat([chunk.unsqueeze(1), pad], dim=1))
 
                 offset += req_len
-        else:
-            # Decode: batch embed_one_token for all semantic tokens
-            semantic_begin = self.output_processor._semantic_begin_id
-            semantic_end = self.output_processor._semantic_end_id
 
-            semantic_indices = []
-            vq_parts_batch = []
+            model_worker_batch.input_ids = torch.cat(slices, dim=0)  # [N, K+1]
+        else:
+            # Decode: [bs, K+1]
+            ids_1d = model_worker_batch.input_ids  # [bs]
+            bs = ids_1d.shape[0]
+            codebook_cols = torch.zeros(
+                bs, num_codebooks, dtype=ids_1d.dtype, device=device
+            )
             for i, sched_req in enumerate(scheduler_output.requests):
                 data: S2ProSGLangRequestData = sched_req.data
                 if data._last_codebook_values is not None:
-                    token_id = input_ids[i]
-                    is_semantic = (token_id >= semantic_begin) & (
-                        token_id <= semantic_end
-                    )
-                    if is_semantic:
-                        semantic_indices.append(i)
-                        vq_parts_batch.append(data._last_codebook_values.to(device))
+                    codebook_cols[i] = data._last_codebook_values.to(device)
 
-            if semantic_indices:
-                idx_t = torch.tensor(semantic_indices, device=device)
-                batch_vq = torch.stack(vq_parts_batch)  # [n, num_codebooks]
-                batch_embeds = text_embeds[idx_t]  # [n, dim]
-                batch_mask = torch.ones(
-                    len(semantic_indices), dtype=torch.bool, device=device
-                )
-                combined = audio_decoder.embed_one_token(
-                    batch_embeds, batch_vq, batch_mask
-                )
-                text_embeds[idx_t] = combined.to(text_embeds.dtype)
-
-        model_worker_batch.input_embeds = text_embeds
+            model_worker_batch.input_ids = torch.cat(
+                [ids_1d.unsqueeze(1), codebook_cols], dim=1
+            )  # [bs, K+1]
 
     def execute(self, scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
         from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -671,8 +640,10 @@ class S2ProSGLangModelRunner:
         model_worker_batch = schedule_batch.get_model_worker_batch()
         is_prefill = schedule_batch.forward_mode.is_extend()
 
-        # Inject VQ embeddings into model_worker_batch
-        self._inject_vq_embeds(model_worker_batch, scheduler_output, is_prefill)
+        # Build 2-D input_ids [N, K+1] for inline VQ embedding
+        self._build_2d_input_ids(
+            model_worker_batch, scheduler_output, is_prefill
+        )
 
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.model_worker.model_runner

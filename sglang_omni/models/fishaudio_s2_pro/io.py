@@ -15,8 +15,9 @@ class S2ProState:
 
     # -- From preprocessing ------------------------------------------------
     input_ids: Any = None  # [seq_len] as list
-    vq_mask_tokens: Any | None = None  # [seq_len] bool as list
-    vq_parts: Any | None = None  # list of [num_codebooks, T_i] as nested lists
+    input_values: Any | None = None  # [K+1, seq_len] fish-style multi-codebook
+    vq_mask_tokens: Any | None = None  # [seq_len] bool as list (legacy)
+    vq_parts: Any | None = None  # list of [num_codebooks, T_i] (legacy)
     num_codebooks: int = 10
     codebook_size: int = 4096
 
@@ -52,6 +53,8 @@ class S2ProState:
         data: dict[str, Any] = {}
         if self.input_ids is not None:
             data["input_ids"] = self._tensor_to_list(self.input_ids)
+        if self.input_values is not None:
+            data["input_values"] = self._tensor_to_list(self.input_values)
         if self.vq_mask_tokens is not None:
             data["vq_mask_tokens"] = self._tensor_to_list(self.vq_mask_tokens)
         if self.vq_parts is not None:
@@ -77,8 +80,12 @@ class S2ProState:
         vq_parts = data.get("vq_parts")
         if vq_parts is not None:
             vq_parts = [torch.tensor(p) if isinstance(p, list) else p for p in vq_parts]
+        input_values = data.get("input_values")
+        if input_values is not None and isinstance(input_values, list):
+            input_values = torch.tensor(input_values)
         return cls(
             input_ids=data.get("input_ids"),
+            input_values=input_values,
             vq_mask_tokens=data.get("vq_mask_tokens"),
             vq_parts=vq_parts,
             num_codebooks=data.get("num_codebooks", 10),

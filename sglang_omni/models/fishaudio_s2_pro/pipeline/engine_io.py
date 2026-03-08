@@ -26,6 +26,14 @@ def build_sglang_tts_request(
         input_ids_list = list(input_ids)
         input_ids = torch.tensor(input_ids_list, dtype=torch.long)
 
+    # Fish-style input_values [K+1, seq_len] → stored as [seq_len, K+1]
+    input_values = state.input_values
+    if input_values is not None:
+        if not isinstance(input_values, torch.Tensor):
+            input_values = torch.tensor(input_values, dtype=torch.long)
+        if input_values.shape[0] == state.num_codebooks + 1:
+            input_values = input_values.T  # [K+1, seq_len] → [seq_len, K+1]
+
     vq_mask_tokens = state.vq_mask_tokens
     if vq_mask_tokens is not None and not isinstance(vq_mask_tokens, torch.Tensor):
         vq_mask_tokens = torch.tensor(vq_mask_tokens, dtype=torch.bool)
@@ -52,6 +60,7 @@ def build_sglang_tts_request(
 
     return S2ProSGLangRequestData(
         input_ids=input_ids,
+        input_values=input_values,
         req=req,
         vq_mask_tokens=vq_mask_tokens,
         vq_parts=vq_parts,

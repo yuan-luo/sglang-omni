@@ -185,6 +185,7 @@ def create_preprocessing_executor(model_path: str) -> PreprocessingExecutor:
 
         state = S2ProState(
             input_ids=prompt_data["input_ids"],
+            input_values=prompt_data.get("input_values"),
             vq_mask_tokens=prompt_data["vq_mask_tokens"],
             vq_parts=prompt_data["vq_parts"],
             num_codebooks=num_codebooks,
