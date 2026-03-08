@@ -90,11 +90,7 @@ curl -s http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-The response follows the OpenAI chat completion shape. In the common case, the text is in:
-
-```json
-choices[0].message.content
-```
+The response follows the OpenAI chat completion shape. In the common case, the text is in `choices[0].message.content`.
 
 Besides `model` and `messages`, the most useful request fields are:
 
