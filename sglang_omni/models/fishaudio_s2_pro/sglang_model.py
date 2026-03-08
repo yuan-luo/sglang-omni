@@ -345,26 +345,28 @@ class S2ProSGLangTextModel(nn.Module):
         At VQ positions (semantic ID in ``[semantic_begin, semantic_end]``),
         codebook embeddings are summed and added to the text embedding,
         then scaled by ``1/sqrt(num_codebooks+1)``.
+
+        Branchless: no ``.any()`` / ``.item()`` calls so this is safe for
+        CUDA graph capture.
         """
         text_embeds = self.embed_tokens(input_ids[:, 0])
 
         vq_masks = (input_ids[:, 0] >= self.semantic_begin_id) & (
             input_ids[:, 0] <= self.semantic_end_id
         )
-        if vq_masks.any():
-            embeds = []
-            for i in range(self.num_codebooks):
-                cb_ids = input_ids[:, i + 1] + i * self.codebook_size
-                embeds.append(self.codebook_embeddings(cb_ids))
-            vq_sum = torch.stack(embeds, dim=1).sum(dim=1)
-            vq_sum[~vq_masks] = 0
-            text_embeds = text_embeds + vq_sum
-            vq_expanded = vq_masks.unsqueeze(-1).expand_as(text_embeds)
-            text_embeds = torch.where(
-                vq_expanded,
-                text_embeds / math.sqrt(self.num_codebooks + 1),
-                text_embeds,
-            )
+
+        embeds = []
+        for i in range(self.num_codebooks):
+            cb_ids = input_ids[:, i + 1] + i * self.codebook_size
+            embeds.append(self.codebook_embeddings(cb_ids))
+        vq_sum = torch.stack(embeds, dim=1).sum(dim=1)
+
+        vq_float = vq_masks.unsqueeze(-1).to(text_embeds.dtype)
+        vq_sum = vq_sum * vq_float
+        text_embeds = text_embeds + vq_sum
+        inv_scale = 1.0 / math.sqrt(self.num_codebooks + 1)
+        scale = vq_float * (inv_scale - 1.0) + 1.0
+        text_embeds = text_embeds * scale
         return text_embeds
 
     def get_embed_tokens(self):

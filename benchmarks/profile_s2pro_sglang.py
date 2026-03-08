@@ -93,6 +93,7 @@ def create_sglang_engine(
     top_k,
     use_torch_compile=False,
     use_cuda_graph=False,
+    use_text_cuda_graph=False,
     max_batch_size=64,
 ):
     from sglang.srt.server_args import ServerArgs
@@ -103,11 +104,12 @@ def create_sglang_engine(
     )
 
     _patch_fish_config_for_sglang(checkpoint)
+    mem_frac = 0.75 if use_text_cuda_graph else 0.85
     server_args = ServerArgs(
         model_path=checkpoint,
         tp_size=1,
         dtype="bfloat16",
-        mem_fraction_static=0.85,
+        mem_fraction_static=mem_frac,
         chunked_prefill_size=8192,
         max_running_requests=max_batch_size,
         disable_cuda_graph=True,
@@ -123,6 +125,7 @@ def create_sglang_engine(
         top_k=top_k,
         use_torch_compile=use_torch_compile,
         use_cuda_graph=use_cuda_graph,
+        use_text_cuda_graph=use_text_cuda_graph,
         max_batch_size=max_batch_size,
     )
 
@@ -604,9 +607,10 @@ async def run_profiling(args):
     use_compile = not args.no_compile
     max_bs = args.max_batch_size
     logger.info(
-        "Creating SGLang engine (compile=%s, cuda_graph=%s, max_bs=%d)...",
+        "Creating SGLang engine (compile=%s, cuda_graph=%s, text_cuda_graph=%s, max_bs=%d)...",
         use_compile,
         args.enable_cuda_graph,
+        args.enable_text_cuda_graph,
         max_bs,
     )
     engine = create_sglang_engine(
@@ -619,6 +623,7 @@ async def run_profiling(args):
         args.top_k,
         use_torch_compile=use_compile,
         use_cuda_graph=args.enable_cuda_graph,
+        use_text_cuda_graph=args.enable_text_cuda_graph,
         max_batch_size=max_bs,
     )
     await engine.start()
@@ -945,6 +950,11 @@ def parse_args():
         "--enable-cuda-graph",
         action="store_true",
         help="Capture CUDA graphs for the codebook loop (fast layer)",
+    )
+    p.add_argument(
+        "--enable-text-cuda-graph",
+        action="store_true",
+        help="Capture CUDA graphs for the text model decode forward pass",
     )
     p.add_argument(
         "--max-batch-size",

@@ -234,6 +234,213 @@ class S2ProFastGraphRunner:
 
 
 # ---------------------------------------------------------------------------
+# CUDA Graph runner for text model decode
+# ---------------------------------------------------------------------------
+
+
+class S2ProTextCudaGraphRunner:
+    """CUDA graph capture / replay for the S2-Pro text model decode path.
+
+    Allocates 2-D ``input_ids [max_bs, num_codebooks+1]`` static buffers
+    and captures the text model's decode forward into CUDA graphs keyed by
+    batch size.  During decode, ``replay()`` copies live data into the static
+    buffers, replays the captured graph, and returns ``(logits, hidden)``.
+
+    This bypasses SGLang's built-in ``CudaGraphRunner`` which only supports
+    1-D ``input_ids``.
+    """
+
+    def __init__(
+        self,
+        model_runner: Any,
+        *,
+        num_codebooks: int = 10,
+        max_bs: int = 64,
+        capture_bs: list[int] | None = None,
+        enable_torch_compile: bool = False,
+    ) -> None:
+        self._model_runner = model_runner
+        self._num_codebooks = num_codebooks
+        self._enable_torch_compile = enable_torch_compile
+        self._graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self._output_buffers: dict[int, tuple[Tensor, Tensor]] = {}
+        self._graph_pool: Any = None
+        self._stream: Any = None
+
+        if capture_bs is None:
+            capture_bs = [1, 2, 4, 8] + [i * 4 for i in range(3, 17)]
+        self._capture_bs = [
+            b
+            for b in capture_bs
+            if b <= max_bs and b <= model_runner.req_to_token_pool.size
+        ]
+        self._max_bs = max(self._capture_bs) if self._capture_bs else 1
+
+        self._attn_backend = model_runner.attn_backend
+        self._seq_len_fill_value = self._attn_backend.get_cuda_graph_seq_len_fill_value()
+
+        with torch.device("cuda"):
+            self._input_ids = torch.zeros(
+                (self._max_bs, num_codebooks + 1), dtype=torch.int32
+            )
+            self._req_pool_indices = torch.zeros((self._max_bs,), dtype=torch.int32)
+            self._seq_lens = torch.full(
+                (self._max_bs,), self._seq_len_fill_value, dtype=torch.int32
+            )
+            self._out_cache_loc = torch.zeros((self._max_bs,), dtype=torch.int32)
+
+        self._seq_lens_cpu = torch.full(
+            (self._max_bs,), self._seq_len_fill_value, dtype=torch.int32
+        )
+
+        self._attn_backend.init_cuda_graph_state(self._max_bs, self._max_bs)
+
+    def capture(self) -> None:
+        from sglang.srt.distributed import graph_capture
+        from sglang.srt.model_executor.cuda_graph_runner import (
+            patch_model,
+            set_torch_compile_config,
+        )
+
+        if self._enable_torch_compile:
+            set_torch_compile_config()
+
+        logger.info(
+            "Capturing text model CUDA graphs for bs %s ...", self._capture_bs
+        )
+
+        with graph_capture() as ctx:
+            self._stream = ctx.stream
+            for bs in self._capture_bs:
+                with patch_model(
+                    self._model_runner.model,
+                    self._enable_torch_compile,
+                    num_tokens=bs,
+                    tp_group=self._model_runner.tp_group,
+                ) as forward:
+                    graph, out = self._capture_one(bs, forward)
+                    self._graphs[bs] = graph
+                    self._output_buffers[bs] = out
+
+        logger.info("Text model CUDA graph capture done (%d sizes)", len(self._graphs))
+
+    def _capture_one(self, bs: int, forward):
+        from sglang.srt.model_executor.forward_batch_info import (
+            ForwardBatch,
+            ForwardMode,
+        )
+
+        graph = torch.cuda.CUDAGraph()
+
+        input_ids = self._input_ids[:bs]
+        req_pool_indices = self._req_pool_indices[:bs]
+        seq_lens = self._seq_lens[:bs]
+        out_cache_loc = self._out_cache_loc[:bs]
+
+        seq_lens_sum = int(self._seq_len_fill_value) * bs
+
+        seq_lens_cpu = self._seq_lens_cpu[:bs]
+
+        self._attn_backend.init_forward_metadata_capture_cuda_graph(
+            bs,
+            bs,
+            req_pool_indices,
+            seq_lens,
+            None,
+            ForwardMode.DECODE,
+            None,
+        )
+
+        def run_once():
+            positions = (seq_lens - 1).clamp(min=0).to(torch.int64)
+            fb = ForwardBatch(
+                forward_mode=ForwardMode.DECODE,
+                batch_size=bs,
+                input_ids=input_ids,
+                req_pool_indices=req_pool_indices,
+                seq_lens=seq_lens,
+                req_to_token_pool=self._model_runner.req_to_token_pool,
+                token_to_kv_pool=self._model_runner.token_to_kv_pool,
+                attn_backend=self._attn_backend,
+                out_cache_loc=out_cache_loc,
+                seq_lens_sum=seq_lens_sum,
+                encoder_lens=None,
+                return_logprob=False,
+                positions=positions,
+            )
+            logits_output = forward(input_ids, positions, fb)
+            return logits_output.next_token_logits, logits_output.hidden_states
+
+        for _ in range(2):
+            torch.cuda.synchronize()
+            run_once()
+            torch.cuda.synchronize()
+
+        torch.cuda.synchronize()
+        with torch.cuda.graph(graph, pool=self._graph_pool, stream=self._stream):
+            out = run_once()
+        torch.cuda.synchronize()
+
+        self._graph_pool = graph.pool()
+        return graph, out
+
+    def can_run(self, batch_size: int) -> bool:
+        return batch_size <= self._max_bs and len(self._graphs) > 0
+
+    def replay(self, forward_batch: Any) -> Any:
+        """Replay text model CUDA graph for a decode batch.
+
+        Copies live ``forward_batch`` data into static buffers, replays the
+        captured graph, and returns a ``GenerationBatchResult``-compatible
+        object with ``logits_output`` and ``can_run_cuda_graph=True``.
+        """
+        from sglang.srt.layers.logits_processor import LogitsProcessorOutput
+        from sglang.srt.managers.scheduler import GenerationBatchResult
+        from sglang.srt.model_executor.forward_batch_info import ForwardMode
+
+        raw_bs = forward_batch.batch_size
+        index = bisect.bisect_left(self._capture_bs, raw_bs)
+        bs = self._capture_bs[index]
+
+        if bs != raw_bs:
+            self._seq_lens.fill_(self._seq_len_fill_value)
+            self._seq_lens_cpu.fill_(self._seq_len_fill_value)
+            self._out_cache_loc.zero_()
+
+        self._input_ids[:raw_bs].copy_(forward_batch.input_ids)
+        self._req_pool_indices[:raw_bs].copy_(forward_batch.req_pool_indices)
+        self._seq_lens[:raw_bs].copy_(forward_batch.seq_lens)
+        self._out_cache_loc[:raw_bs].copy_(forward_batch.out_cache_loc)
+        if hasattr(forward_batch, "seq_lens_cpu") and forward_batch.seq_lens_cpu is not None:
+            self._seq_lens_cpu[:raw_bs].copy_(forward_batch.seq_lens_cpu[:raw_bs])
+        else:
+            self._seq_lens_cpu[:raw_bs].copy_(forward_batch.seq_lens[:raw_bs].cpu())
+
+        self._attn_backend.init_forward_metadata_replay_cuda_graph(
+            bs,
+            self._req_pool_indices,
+            self._seq_lens,
+            forward_batch.seq_lens_sum + (bs - raw_bs) * self._seq_len_fill_value,
+            None,
+            ForwardMode.DECODE,
+            None,
+            seq_lens_cpu=self._seq_lens_cpu,
+        )
+
+        self._graphs[bs].replay()
+        logits, hidden = self._output_buffers[bs]
+
+        logits_output = LogitsProcessorOutput(
+            next_token_logits=logits[:raw_bs],
+            hidden_states=hidden[:raw_bs],
+        )
+        return GenerationBatchResult(
+            logits_output=logits_output,
+            can_run_cuda_graph=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # OutputProcessor: two-stage sampling (semantic + codebooks)
 # ---------------------------------------------------------------------------
 
@@ -570,10 +777,12 @@ class S2ProSGLangModelRunner:
         model_worker: "ModelWorker",
         output_processor: S2ProSGLangOutputProcessor,
         batch_planner: SGLangBatchPlanner | None = None,
+        text_graph_runner: S2ProTextCudaGraphRunner | None = None,
     ):
         self.model_worker = model_worker
         self.output_processor = output_processor
         self.batch_planner = batch_planner
+        self._text_graph_runner = text_graph_runner
 
     def _build_2d_input_ids(
         self,
@@ -648,7 +857,16 @@ class S2ProSGLangModelRunner:
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.model_worker.model_runner
         )
-        batch_result = self.model_worker.forward_batch_generation(forward_batch)
+
+        # Decode: use text model CUDA graph when available
+        if (
+            not is_prefill
+            and self._text_graph_runner is not None
+            and self._text_graph_runner.can_run(forward_batch.batch_size)
+        ):
+            batch_result = self._text_graph_runner.replay(forward_batch)
+        else:
+            batch_result = self.model_worker.forward_batch_generation(forward_batch)
 
         # For prefill-only batches, produce dummy tokens for SGLang bookkeeping
         if schedule_batch.is_prefill_only:

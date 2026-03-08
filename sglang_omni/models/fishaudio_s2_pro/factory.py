@@ -15,6 +15,7 @@ from .runtime.s2pro_sglang_ar import (
     S2ProSGLangModelRunner,
     S2ProSGLangOutputProcessor,
     S2ProSGLangResourceManager,
+    S2ProTextCudaGraphRunner,
 )
 from .tokenizer import S2ProTokenizerAdapter
 
@@ -86,6 +87,7 @@ def create_s2pro_sglang_engine(
     ras_top_p: float = 0.95,
     use_torch_compile: bool = True,
     use_cuda_graph: bool = False,
+    use_text_cuda_graph: bool = False,
     max_batch_size: int = 64,
 ) -> OmniEngine:
     """Create a paged-attention S2-Pro engine using SGLang backend."""
@@ -189,6 +191,17 @@ def create_s2pro_sglang_engine(
             return None
         return step_out.codes
 
+    # Text model CUDA graph runner (captures decode forward pass)
+    text_graph_runner = None
+    if use_text_cuda_graph:
+        text_graph_runner = S2ProTextCudaGraphRunner(
+            model_runner=model_worker.model_runner,
+            num_codebooks=num_codebooks,
+            max_bs=max_batch_size,
+            enable_torch_compile=False,
+        )
+        text_graph_runner.capture()
+
     scheduler = Scheduler(
         batch_planner=batch_planner,
         resource_manager=resource_mgr,
@@ -196,7 +209,10 @@ def create_s2pro_sglang_engine(
         stream_adapter=_stream_adapter,
     )
     model_runner = S2ProSGLangModelRunner(
-        model_worker, output_processor, batch_planner=batch_planner
+        model_worker,
+        output_processor,
+        batch_planner=batch_planner,
+        text_graph_runner=text_graph_runner,
     )
 
     return OmniEngine(scheduler=scheduler, model_runner=model_runner)
