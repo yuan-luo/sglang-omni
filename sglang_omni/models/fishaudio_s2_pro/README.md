@@ -41,6 +41,17 @@ decoder codebook loop is efficiently batched across concurrent requests.
 | WER (median) | 0.0% |
 | Samples >50% WER | 0 (0.0%) |
 
+### Optimizations Applied
+
+| Optimization | Status | Impact |
+|---|---|---|
+| topk + Gumbel-max sampling | Done | O(V log V) → O(V + k log k), no CUDA sync |
+| CUDA graph for codebook loop | Done | Eliminates kernel launch overhead at BS>1 |
+| Continuous batching support | Done | Realistic load testing with Poisson arrivals |
+| RadixAttention prefix cache | Built-in | Shared ref audio → TTFT speedup on cache hit |
+| torch.compile (max-autotune-no-cudagraphs) | Done | Avoids internal CUDA graph WER corruption |
+| Text model CUDA graph | Not yet | Requires `input_ids`-only forward (hard) |
+
 ### Known Issues
 
 - `torch.compile` produces 99% WER (pre-existing bug, unrelated to batch changes). Use `--no-compile` for correct output. With compile enabled, single-request tok/s is ~60 but audio quality is broken.
@@ -69,4 +80,37 @@ CUDA_VISIBLE_DEVICES=0 python benchmarks/profile_s2pro_sglang.py \
     --testset $SEED_TTS/seedtts_testset/en/meta.lst \
     --output-dir results/s2pro_sglang_batched \
     --max-samples 50 --batch-sizes 1,2,4,8 --no-compile
+
+# Continuous batching (Poisson arrival at 10 req/s)
+CUDA_VISIBLE_DEVICES=0 python benchmarks/profile_s2pro_sglang.py \
+    --checkpoint $S2PRO_CKPT \
+    --testset $SEED_TTS/seedtts_testset/en/meta.lst \
+    --output-dir results/s2pro_continuous \
+    --max-samples 50 --batch-sizes 4 --request-rate 10 --no-compile
+
+# Shared-prefix cache test (same ref audio, different texts)
+CUDA_VISIBLE_DEVICES=0 python benchmarks/profile_s2pro_sglang.py \
+    --checkpoint $S2PRO_CKPT \
+    --testset $SEED_TTS/seedtts_testset/en/meta.lst \
+    --output-dir results/s2pro_prefix \
+    --max-samples 20 --batch-sizes 1 --test-shared-prefix --no-compile
+
+# With CUDA graph enabled
+CUDA_VISIBLE_DEVICES=0 python benchmarks/profile_s2pro_sglang.py \
+    --checkpoint $S2PRO_CKPT \
+    --testset $SEED_TTS/seedtts_testset/en/meta.lst \
+    --output-dir results/s2pro_cudagraph \
+    --max-samples 50 --batch-sizes 1,2,4,8 --enable-cuda-graph --no-compile
 ```
+
+### Benchmark Flags Reference
+
+| Flag | Description |
+|---|---|
+| `--batch-sizes 1,2,4,8` | Comma-separated batch sizes to test |
+| `--request-rate <float>` | Poisson arrival rate (req/s). Default `inf` = burst mode |
+| `--test-shared-prefix` | Test RadixAttention prefix cache with shared ref audio |
+| `--enable-cuda-graph` | Enable CUDA graph capture for codebook loop |
+| `--max-batch-size <int>` | Max batch size for CUDA graph capture (default 64) |
+| `--no-compile` | Disable torch.compile (recommended until compile WER bug is fixed) |
+| `--save-audio` | Save generated audio files for WER evaluation |
