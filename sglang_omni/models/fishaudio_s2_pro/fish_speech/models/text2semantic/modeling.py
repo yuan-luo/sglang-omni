@@ -1,10 +1,9 @@
 """
 FishQwen3 models following HuggingFace conventions.
 
-This module contains the model implementations with proper separation:
+This module contains the model implementations:
 - FishQwen3Model: Base transformer without any head
 - FishQwen3ForCausalLM: For language modeling
-- FishQwen3ForSequenceClassification: For reward modeling
 - FishQwen3OmniForCausalLM: Omni model for causal language modeling with audio
 """
 
@@ -13,28 +12,18 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-import numpy as np
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 
 # liger_kernel removed for inference
 from torch import Tensor
 from torch.nn import functional as F
-from torch.utils.checkpoint import checkpoint
 from transformers import AutoConfig, AutoModel, PreTrainedModel
-from transformers.modeling_outputs import SequenceClassifierOutputWithPast
 
-from sglang_omni.models.fishaudio_s2_pro.fish_speech.models.kernels.functional import (
-    triton_grouped_gemm,
-)
 from sglang_omni.models.fishaudio_s2_pro.fish_speech.models.text2semantic.configuration import (
     FishQwen3AudioDecoderConfig,
-    FishQwen3AudioEncoderConfig,
     FishQwen3Config,
-    FishQwen3ForSequenceClassificationConfig,
     FishQwen3OmniConfig,
-    FishQwen3OmniForSequenceClassificationConfig,
 )
 from sglang_omni.models.fishaudio_s2_pro.fish_speech.models.text2semantic.utils import (
     apply_rotary_emb,
@@ -60,12 +49,6 @@ except ImportError:
 log = RankedLogger(__name__, rank_zero_only=True)
 
 FISH_BATCH_INVARIANT = os.getenv("FISH_BATCH_INVARIANT", "false").lower() in (
-    "true",
-    "1",
-    "yes",
-)
-
-ENABLE_TORCH_GROUPED_MM = os.getenv("ENABLE_TORCH_GROUPED_MM", "true").lower() in (
     "true",
     "1",
     "yes",
@@ -403,264 +386,17 @@ class FeedForward(nn.Module):
         return self.w2(F.silu(x1) * x3)
 
 
-class MoeFusedLinear(nn.Module):
-    """
-    Fused linear layer for Mixture of Experts.
-
-    Uses torch._grouped_mm when dimensions >= 8 (16-byte alignment for bf16),
-    otherwise falls back to Triton kernel.
-    """
-
-    # Minimum dimension for torch._grouped_mm (16 bytes / 2 bytes per bf16 = 8)
-    MIN_DIM_FOR_GROUPED_MM = 8
-
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        num_experts: int,
-    ) -> None:
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.num_experts = num_experts
-        self.weight = nn.Parameter(
-            torch.empty((num_experts, out_features, in_features))
-        )
-        self.reset_parameters()
-
-    def reset_parameters(self) -> None:
-        # Kaiming uniform on in_features
-        # Although Qwen's default activation is silu, we set the gain `a = sqrt(5)` following the original Linear
-        in_features = self.weight.shape[-1]
-        bound = math.sqrt(3 * 5 / in_features)
-        nn.init.uniform_(self.weight, -bound, bound)
-
-    def forward(
-        self,
-        input: torch.Tensor,
-        m_sizes: torch.Tensor,
-        offsets: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        # Use torch._grouped_mm when dimensions meet alignment requirements,
-        # otherwise fall back to Triton kernel
-        if (
-            self.in_features >= self.MIN_DIM_FOR_GROUPED_MM
-            and self.out_features >= self.MIN_DIM_FOR_GROUPED_MM
-            and ENABLE_TORCH_GROUPED_MM
-        ):
-            # torch._grouped_mm path
-            if offsets is None:
-                offsets = torch.cumsum(m_sizes, dim=0, dtype=torch.int32)
-            input_bf16 = input.bfloat16().contiguous()
-            weight_t = self.weight.bfloat16().transpose(-2, -1).contiguous()
-            output = torch._grouped_mm(input_bf16, weight_t, offs=offsets)
-            return output.to(input.dtype)
-        else:
-            # Triton kernel fallback for small dimensions
-            return triton_grouped_gemm(input, self.weight, m_sizes)
-
-    def extra_repr(self) -> str:
-        return f"in_features={self.in_features}, out_features={self.out_features}, num_experts={self.num_experts}"
-
-
-class MoE(nn.Module):
-    """Mixture of Experts module."""
-
-    def __init__(self, config):
-        super().__init__()
-
-        self.config = config
-        self.num_experts = config.num_experts
-        self.top_k = config.num_experts_per_tok
-        self.norm_topk_prob = config.norm_topk_prob
-        self.use_aux_loss_free = config.use_aux_loss_free
-        self.gamma = config.router_gamma
-
-        # gating
-        self.gate = nn.Linear(config.dim, config.num_experts, bias=False)
-        self.gate_proj = MoeFusedLinear(
-            config.dim, config.moe_intermediate_size, config.num_experts
-        )
-        self.up_proj = MoeFusedLinear(
-            config.dim, config.moe_intermediate_size, config.num_experts
-        )
-        self.down_proj = MoeFusedLinear(
-            config.moe_intermediate_size, config.dim, config.num_experts
-        )
-
-        # Aux-loss-free expert bias buffer
-        if self.use_aux_loss_free:
-            self.register_buffer(
-                "expert_bias", torch.zeros(config.num_experts, dtype=torch.float32)
-            )
-            # Non-persistent buffer for counting tokens per expert (avoid graph breaks)
-            self.register_buffer(
-                "_expert_counts",
-                torch.zeros(config.num_experts, dtype=torch.float32),
-                persistent=False,
-            )
-
-    @torch.amp.autocast(device_type="cuda", enabled=False)
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        expert_indices: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Forward pass for MoE layer.
-
-        Args:
-            hidden_states: Input tensor of shape (sequence_length, hidden_dim)
-            expert_indices: Optional tensor of shape (sequence_length, top_k) containing
-                            pre-determined expert indices for replay. If provided, the
-                            routing decision is replayed instead of computed from gate.
-
-        Returns:
-            Tuple of:
-                - output: Output tensor of shape (sequence_length, hidden_dim)
-                - router_logits: Router logits of shape (sequence_length, num_experts)
-                - expert_indices_out: Selected expert indices of shape (sequence_length, top_k)
-        """
-
-        input_dtype = hidden_states.dtype
-        sequence_length, hidden_dim = hidden_states.shape
-
-        # FP32 router
-        router_logits = F.linear(
-            hidden_states.to(torch.float32),
-            self.gate.weight.to(torch.float32),
-            bias=(
-                self.gate.bias.to(torch.float32) if self.gate.bias is not None else None
-            ),
-        )
-
-        if self.use_aux_loss_free:
-            # Aux-loss-free mode: use sigmoid and add expert_bias for selection
-            routing_weights = torch.sigmoid(router_logits)
-            selection_scores = routing_weights + self.expert_bias
-        else:
-            routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
-            selection_scores = routing_weights
-
-        if expert_indices is not None:
-            # Replay mode: use provided expert indices
-            selected_experts = expert_indices  # (sequence_length, top_k)
-        else:
-            # Normal mode: select top-k experts based on selection_scores
-            _, selected_experts = torch.topk(selection_scores, self.top_k, dim=-1)
-
-        # Gather the routing weights for the selected experts
-        routing_weights = torch.gather(routing_weights, 1, selected_experts)
-
-        # Store the expert indices before reshaping for return
-        expert_indices_out = selected_experts.clone()  # (sequence_length, top_k)
-
-        # Update expert bias during training (aux-loss-free mode)
-        if self.use_aux_loss_free and self.training and expert_indices is None:
-            self._update_bias(expert_indices_out, sequence_length)
-
-        if self.norm_topk_prob:  # only diff with mixtral sparse moe block!
-            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-
-        assert (
-            routing_weights.dtype == torch.float32
-        ), "Routing weights must be in float32"
-
-        # we cast back to the input dtype
-        routing_weights = routing_weights.to(input_dtype)
-
-        hidden_states = hidden_states.unsqueeze(1).expand(
-            sequence_length, self.top_k, hidden_dim
-        )
-        # hidden_states must be contiguous
-        hidden_states = hidden_states.reshape(sequence_length * self.top_k, hidden_dim)
-        selected_experts = selected_experts.view(sequence_length * self.top_k)
-
-        # Sort selected_experts and hidden_states for better memory coalescence of weight
-        sort_idx = torch.argsort(selected_experts, stable=True)
-        inv_sort_idx = torch.argsort(sort_idx)
-        hidden_states = hidden_states[sort_idx]
-
-        # Compute num_tokens_per_expert (m_sizes) and offsets
-        m_sizes = torch.histc(
-            selected_experts.float(), bins=self.num_experts, min=0, max=self.num_experts
-        ).int()
-        offsets = torch.cumsum(m_sizes, dim=0, dtype=torch.int32)
-
-        hidden_states = self.forward_mlp(hidden_states, m_sizes, offsets)
-
-        hidden_states = hidden_states[inv_sort_idx]
-
-        hidden_states = hidden_states.view(sequence_length, self.top_k, hidden_dim)
-        hidden_states = torch.einsum("beo,be->bo", hidden_states, routing_weights)
-
-        return hidden_states, router_logits, expert_indices_out
-
-    def forward_mlp(self, hidden_states, m_sizes, offsets):
-        # It's possible to fuse gate_h and up_h, but this affects the shape of LoRA
-        gate_h = self.gate_proj(hidden_states, m_sizes, offsets)
-        up_h = self.up_proj(hidden_states, m_sizes, offsets)
-        hidden_states = F.silu(gate_h) * up_h
-        del gate_h, up_h
-        hidden_states = self.down_proj(hidden_states, m_sizes, offsets)
-        return hidden_states
-
-    @torch.no_grad()
-    def _update_bias(self, topk_indices, local_tokens):
-        """Update expert bias for aux-loss-free load balancing."""
-        # Count tokens per expert (local) using pre-registered buffer
-        self._expert_counts.zero_()
-        flat_indices = topk_indices.view(-1)
-        self._expert_counts.scatter_add_(
-            0,
-            flat_indices,
-            torch.ones_like(flat_indices, dtype=self._expert_counts.dtype),
-        )
-
-        # All-reduce across all ranks to get global counts
-        if dist.is_initialized():
-            dist.all_reduce(self._expert_counts, op=dist.ReduceOp.SUM)
-            # Also need global token count
-            total_tokens = torch.tensor(
-                [local_tokens * self.top_k], device=self._expert_counts.device
-            )
-            dist.all_reduce(total_tokens, op=dist.ReduceOp.SUM)
-        else:
-            total_tokens = local_tokens * self.top_k
-
-        # Expected tokens per expert (uniform)
-        expected = total_tokens / self.num_experts
-
-        # Update bias: decrease for overloaded, increase for underloaded
-        overloaded = self._expert_counts > expected
-        underloaded = self._expert_counts < expected
-
-        self.expert_bias[overloaded] -= self.gamma
-        self.expert_bias[underloaded] += self.gamma
-
-        # Broadcast expert_bias from rank 0 to ensure consistency
-        if dist.is_initialized():
-            dist.broadcast(self.expert_bias, src=0)
-
-
 class TransformerBlock(nn.Module):
     """Transformer block with attention and feed-forward."""
 
     def __init__(self, config: FishQwen3Config) -> None:
         super().__init__()
         self.attention = Attention(config)
-
-        if config.use_moe:
-            self.feed_forward = MoE(config)
-        else:
-            self.feed_forward = FeedForward(
-                dim=config.dim, intermediate_size=config.intermediate_size
-            )
-
+        self.feed_forward = FeedForward(
+            dim=config.dim, intermediate_size=config.intermediate_size
+        )
         self.ffn_norm = RMSNorm(config.dim, config.norm_eps)
         self.attention_norm = RMSNorm(config.dim, config.norm_eps)
-        self.use_moe = config.use_moe
 
     def forward(
         self,
@@ -668,74 +404,28 @@ class TransformerBlock(nn.Module):
         freqs_cis: Tensor,
         cumsum_lengths: Optional[Tensor] = None,
         max_length: Optional[int] = None,
-        expert_indices: Optional[Tensor] = None,
-    ) -> Tensor | tuple[Tensor, Tensor, Tensor]:
-        """
-        Forward pass.
-
-        Args:
-            x: Input tensor (batch_size, seq_len, dim) or (seq_len, dim)
-            freqs_cis: RoPE frequencies (seq_len, head_dim)
-            cumsum_lengths: Cumulative sequence lengths (optional)
-            max_length: Maximum sequence length (optional)
-            expert_indices: Optional expert indices for MoE replay (seq_len, top_k)
-
-        Returns:
-            If not use_moe: output tensor
-            If use_moe: tuple of (output, router_logits, expert_indices)
-        """
+    ) -> Tensor:
         h = x + self.attention(
             self.attention_norm(x),
             freqs_cis=freqs_cis,
             cumsum_lengths=cumsum_lengths,
             max_length=max_length,
         )
-
-        if not self.use_moe:
-            return h + self.feed_forward(self.ffn_norm(h))
-
-        out, router_logits, expert_indices_out = self.feed_forward(
-            self.ffn_norm(h), expert_indices=expert_indices
-        )
-        return h + out, router_logits, expert_indices_out
+        return h + self.feed_forward(self.ffn_norm(h))
 
     def forward_kvcached(
         self,
         x: Tensor,
         freqs_cis: Tensor,
         cache_seqlens: Tensor,
-        expert_indices: Optional[Tensor] = None,
-    ) -> Tensor | tuple[Tensor, Tensor, Tensor]:
-        """
-        Forward pass with KV cache for autoregressive generation.
-
-        Args:
-            x: Input tensor (batch_size, seq_len, dim)
-            freqs_cis: RoPE frequencies (seq_len, head_dim)
-            cache_seqlens: Current sequence lengths in the KV cache (batch_size,)
-            expert_indices: Optional expert indices for MoE replay (batch_size * seq_len, top_k)
-
-        Returns:
-            If not use_moe: output tensor (batch_size, seq_len, dim)
-            If use_moe: tuple of (output, router_logits, expert_indices)
-        """
+        **kwargs,
+    ) -> Tensor:
         h = x + self.attention.forward_kvcached(
             self.attention_norm(x),
             freqs_cis=freqs_cis,
             cache_seqlens=cache_seqlens,
         )
-
-        if not self.use_moe:
-            return h + self.feed_forward(self.ffn_norm(h))
-
-        # For MoE, we need to handle the 3D input shape
-        bsz, seqlen, dim = h.shape
-        h_flat = self.ffn_norm(h).view(bsz * seqlen, dim)
-        out, router_logits, expert_indices_out = self.feed_forward(
-            h_flat, expert_indices=expert_indices
-        )
-        out = out.view(bsz, seqlen, dim)
-        return h + out, router_logits, expert_indices_out
+        return h + self.feed_forward(self.ffn_norm(h))
 
 
 # ============================================================================
@@ -1225,66 +915,6 @@ class FishQwen3ForCausalLM(FishQwen3PreTrainedModel):
 
 
 # ============================================================================
-# FishQwen3ForSequenceClassification - For reward modeling
-# ============================================================================
-
-
-class FishQwen3ForSequenceClassification(FishQwen3PreTrainedModel):
-    """FishQwen3 model for sequence classification (e.g., reward modeling)."""
-
-    config_class = FishQwen3ForSequenceClassificationConfig
-
-    def __init__(self, config: FishQwen3ForSequenceClassificationConfig):
-        super().__init__(config)
-        self.num_labels = config.num_labels
-        self.model = FishQwen3Model(config)
-        self.score = nn.Linear(config.dim, config.num_labels, bias=False)
-
-        self.post_init()
-
-    def forward(
-        self,
-        input_ids: Tensor,
-        lengths: Tensor,
-        labels: Optional[Tensor] = None,
-        **kwargs,
-    ) -> SequenceClassifierOutputWithPast:
-        """Forward pass with optional loss computation."""
-        # Get hidden states (and router_logits if MoE)
-        result = self.model(input_ids, lengths, **kwargs)
-
-        if self.config.use_moe:
-            hidden_states, router_logits = result
-        else:
-            hidden_states = result
-            router_logits = None
-
-        # Compute scores
-        logits = self.score(hidden_states)
-
-        loss = None
-        if labels is not None:
-            if self.num_labels == 1:
-                # Regression
-                loss = F.binary_cross_entropy_with_logits(
-                    logits.squeeze(), labels.float().squeeze()
-                )
-            else:
-                # Classification
-                loss = F.cross_entropy(
-                    logits.view(-1, self.num_labels), labels.view(-1)
-                )
-
-        return SequenceClassifierOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=None,
-            hidden_states=hidden_states,
-            attentions=router_logits,  # Store router_logits in attentions field
-        )
-
-
-# ============================================================================
 # FishQwen3AudioDecoder - Fast decoder for codebook prediction
 # ============================================================================
 
@@ -1550,171 +1180,6 @@ class FishQwen3AudioDecoder(PreTrainedModel):
         )
 
 
-# ============================================================================
-# FishQwen3AudioEncoder - Audio encoder with packed attention
-# ============================================================================
-
-
-class SinusoidsPositionEmbedding(nn.Module):
-    """Sinusoidal positional embeddings."""
-
-    def __init__(self, length: int, channels: int, max_timescale: float = 10000.0):
-        super().__init__()
-        if channels % 2 != 0:
-            raise ValueError("SinusoidsPositionEmbedding needs even channels input")
-
-        log_timescale_increment = np.log(max_timescale) / (channels // 2 - 1)
-        inv_timescales = torch.exp(
-            -log_timescale_increment * torch.arange(channels // 2).float()
-        )
-        scaled_time = (
-            torch.arange(length)[:, np.newaxis] * inv_timescales[np.newaxis, :]
-        )
-        self.register_buffer(
-            "positional_embedding",
-            torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=1),
-            persistent=False,
-        )
-
-    def forward(self, seqlen: int) -> Tensor:
-        return self.positional_embedding[:seqlen, :]
-
-
-class FishQwen3AudioAttention(nn.Module):
-    """Multi-headed attention for audio encoder with packed sequences."""
-
-    def __init__(self, config: FishQwen3AudioEncoderConfig):
-        super().__init__()
-        self.embed_dim = config.d_model
-        self.num_heads = config.encoder_attention_heads
-        self.head_dim = self.embed_dim // self.num_heads
-
-        if (self.head_dim * self.num_heads) != self.embed_dim:
-            raise ValueError(
-                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim}"
-                f" and `num_heads`: {self.num_heads})."
-            )
-
-        self.scaling = self.head_dim**-0.5
-
-        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
-        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
-        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
-        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
-
-    def forward(
-        self,
-        hidden_states: Tensor,
-        cumsum_lengths: Tensor,
-        max_length: int,
-    ) -> Tensor:
-        """
-        Forward pass with packed sequences.
-
-        Args:
-            hidden_states: (total_seq_len, embed_dim)
-            cumsum_lengths: (num_sequences + 1,) cumulative sequence lengths
-            max_length: Maximum sequence length in the batch
-
-        Returns:
-            Output tensor of shape (total_seq_len, embed_dim)
-        """
-        seq_length = hidden_states.size(0)
-
-        # Project to Q, K, V
-        query_states = self.q_proj(hidden_states).reshape(
-            seq_length, self.num_heads, -1
-        )
-        key_states = self.k_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
-        value_states = self.v_proj(hidden_states).reshape(
-            seq_length, self.num_heads, -1
-        )
-
-        # Use flash attention with packed sequences (varlen)
-        kwargs = {}
-        if FLASH_ATTN_VERSION == 3 and FISH_BATCH_INVARIANT:
-            kwargs["num_splits"] = True
-
-        attn_output = flash_attn_varlen_func(
-            q=query_states,
-            k=key_states,
-            v=value_states,
-            cu_seqlens_q=cumsum_lengths,
-            cu_seqlens_k=cumsum_lengths,
-            max_seqlen_q=max_length,
-            max_seqlen_k=max_length,
-            causal=False,  # Audio encoder is bidirectional within chunks
-            deterministic=FISH_BATCH_INVARIANT,
-            **kwargs,
-        )
-
-        attn_output = attn_output.reshape(seq_length, -1).contiguous()
-        attn_output = self.out_proj(attn_output)
-
-        return attn_output
-
-
-class FishQwen3AudioEncoderLayer(nn.Module):
-    """Transformer encoder layer for audio with attention and FFN."""
-
-    def __init__(self, config: FishQwen3AudioEncoderConfig):
-        super().__init__()
-        self.embed_dim = config.d_model
-        self.self_attn = FishQwen3AudioAttention(config)
-        self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.dropout = config.dropout
-        self.activation_fn = nn.GELU()
-        self.activation_dropout = config.activation_dropout
-        self.fc1 = nn.Linear(self.embed_dim, config.encoder_ffn_dim)
-        self.fc2 = nn.Linear(config.encoder_ffn_dim, self.embed_dim)
-        self.final_layer_norm = nn.LayerNorm(self.embed_dim)
-
-    def forward(
-        self,
-        hidden_states: Tensor,
-        cumsum_lengths: Tensor,
-        max_length: int,
-    ) -> Tensor:
-        """
-        Forward pass.
-
-        Args:
-            hidden_states: (total_seq_len, embed_dim)
-            cumsum_lengths: (num_sequences + 1,)
-            max_length: Maximum sequence length
-
-        Returns:
-            Output tensor of shape (total_seq_len, embed_dim)
-        """
-        residual = hidden_states
-        hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            cumsum_lengths=cumsum_lengths,
-            max_length=max_length,
-        )
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.final_layer_norm(hidden_states)
-        hidden_states = self.fc1(hidden_states)
-        hidden_states = self.activation_fn(hidden_states)
-        hidden_states = F.dropout(
-            hidden_states, p=self.activation_dropout, training=self.training
-        )
-        hidden_states = self.fc2(hidden_states)
-        hidden_states = residual + hidden_states
-
-        # Clamping for fp16 stability
-        if hidden_states.dtype == torch.float16:
-            clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-            hidden_states = torch.clamp(
-                hidden_states, min=-clamp_value, max=clamp_value
-            )
-
-        return hidden_states
-
-
 def _get_feat_extract_output_lengths(input_lengths: Tensor | int) -> Tensor | int:
     """
     Computes the output length of the convolutional layers.
@@ -1727,186 +1192,6 @@ def _get_feat_extract_output_lengths(input_lengths: Tensor | int) -> Tensor | in
         ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
     )
     return output_lengths
-
-
-class FishQwen3AudioEncoder(PreTrainedModel):
-    """
-    Audio encoder based on Qwen3OmniMoeAudioEncoder, adapted for packed/causal sequences.
-
-    This encoder processes mel-spectrogram features through:
-    1. Convolutional downsampling (3 layers, stride 2 each = 8x downsampling)
-    2. Positional embeddings
-    3. Transformer encoder layers with packed attention
-    4. Output projection
-    """
-
-    config_class = FishQwen3AudioEncoderConfig
-    base_model_prefix = "audio_encoder"
-
-    def __init__(self, config: FishQwen3AudioEncoderConfig):
-        super().__init__(config)
-        self.config = config
-        self.dropout = config.dropout
-
-        embed_dim = config.d_model
-        self.num_mel_bins = config.num_mel_bins
-        self.max_source_positions = config.max_source_positions
-        self.embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
-        self.n_window = config.n_window
-        self.n_window_infer = config.n_window_infer
-        self.conv_chunksize = config.conv_chunksize
-
-        # Positional embeddings
-        self.positional_embedding = SinusoidsPositionEmbedding(
-            self.max_source_positions, embed_dim
-        )
-
-        # Convolutional downsampling layers (3 Conv2d with stride 2)
-        self.conv2d1 = nn.Conv2d(1, config.downsample_hidden_size, 3, 2, padding=1)
-        self.conv2d2 = nn.Conv2d(
-            config.downsample_hidden_size,
-            config.downsample_hidden_size,
-            3,
-            2,
-            padding=1,
-        )
-        self.conv2d3 = nn.Conv2d(
-            config.downsample_hidden_size,
-            config.downsample_hidden_size,
-            3,
-            2,
-            padding=1,
-        )
-
-        # Output projection from conv features to model dimension
-        conv_output_dim = config.downsample_hidden_size * (
-            (((config.num_mel_bins + 1) // 2 + 1) // 2 + 1) // 2
-        )
-        self.conv_out = nn.Linear(conv_output_dim, config.d_model, bias=False)
-
-        # Transformer encoder layers
-        self.layers = nn.ModuleList(
-            [FishQwen3AudioEncoderLayer(config) for _ in range(config.encoder_layers)]
-        )
-        self.ln_post = nn.LayerNorm(config.d_model)
-
-        # Final projection layers
-        self.proj1 = nn.Linear(config.d_model, config.d_model)
-        self.act = nn.GELU()
-        self.proj2 = nn.Linear(config.d_model, config.output_dim)
-
-    def forward(
-        self,
-        input_features: Tensor,
-        feature_lens: Tensor,
-    ) -> Tensor:
-        """
-        Forward pass.
-
-        Args:
-            input_features: (num_mel_bins, total_length) mel-spectrogram features
-            feature_lens: (batch_size,) lengths of each sequence
-
-        Returns:
-            Output embeddings of shape (total_output_length, output_dim)
-        """
-        # Calculate output lengths after convolution
-        aftercnn_lens = _get_feat_extract_output_lengths(feature_lens)
-        chunk_num = torch.ceil(feature_lens.float() / (self.n_window * 2)).long()
-
-        # Create chunk lengths
-        chunk_lengths = torch.tensor(
-            [self.n_window * 2] * chunk_num.sum(),
-            dtype=torch.long,
-            device=feature_lens.device,
-        )
-        tail_chunk_index = F.pad(chunk_num, (1, 0), value=-1).cumsum(0)[1:]
-        chunk_lengths[tail_chunk_index] = feature_lens % (self.n_window * 2)
-        chunk_lengths[chunk_lengths == 0] = self.n_window * 2
-
-        # Split into chunks and pad
-        chunk_list = input_features.T.split(chunk_lengths.tolist(), dim=0)
-        padded_feature = nn.utils.rnn.pad_sequence(
-            chunk_list, batch_first=True
-        ).transpose(1, 2)
-
-        # Calculate lengths after CNN
-        feature_lens_after_cnn = _get_feat_extract_output_lengths(chunk_lengths)
-        padded_mask_after_cnn = nn.utils.rnn.pad_sequence(
-            [
-                torch.ones(length, dtype=torch.bool, device=padded_feature.device)
-                for length in feature_lens_after_cnn
-            ],
-            batch_first=True,
-        )
-
-        # Apply convolutional layers in chunks to avoid OOM
-        padded_feature = padded_feature.unsqueeze(1)
-        padded_embeds = []
-        for chunk in padded_feature.split(self.conv_chunksize, dim=0):
-            padded_embed = F.gelu(self.conv2d1(chunk))
-            padded_embed = F.gelu(self.conv2d2(padded_embed))
-            padded_embed = F.gelu(self.conv2d3(padded_embed))
-            padded_embeds.append(padded_embed)
-        padded_embed = torch.cat(padded_embeds, dim=0)
-
-        # Reshape and project
-        b, c, f, t = padded_embed.size()
-        padded_embed = self.conv_out(
-            padded_embed.permute(0, 3, 1, 2).contiguous().view(b, t, c * f)
-        )
-
-        # Add positional embeddings
-        positional_embedding = (
-            self.positional_embedding.positional_embedding[: padded_embed.shape[1], :]
-            .unsqueeze(0)
-            .to(padded_embed.dtype)
-        )
-        padded_embed = padded_embed + positional_embedding
-
-        # Extract valid (non-padded) positions
-        hidden_states = padded_embed[padded_mask_after_cnn]
-
-        # Prepare cumulative sequence lengths for packed attention
-        cu_chunk_lens = [0]
-        window_aftercnn = padded_mask_after_cnn.shape[-1] * (
-            self.n_window_infer // (self.n_window * 2)
-        )
-        for cnn_len in aftercnn_lens:
-            cu_chunk_lens += [window_aftercnn] * (cnn_len // window_aftercnn)
-            remainder = cnn_len % window_aftercnn
-            if remainder != 0:
-                cu_chunk_lens += [remainder]
-
-        cu_seqlens = (
-            torch.tensor(cu_chunk_lens, device=aftercnn_lens.device)
-            .cumsum(-1, dtype=torch.int32)
-            .int()
-        )
-        max_seqlen = max(
-            [cu_chunk_lens[i] for i in range(1, len(cu_chunk_lens))] or [1]
-        )
-
-        # Apply transformer encoder layers
-        for encoder_layer in self.layers:
-            if self.config.use_gradient_checkpointing and self.training:
-                hidden_states = checkpoint(
-                    encoder_layer,
-                    hidden_states,
-                    cu_seqlens,
-                    max_seqlen,
-                    use_reentrant=True,
-                )
-            else:
-                hidden_states = encoder_layer(hidden_states, cu_seqlens, max_seqlen)
-
-        # Final layer norm and projection
-        hidden_states = self.ln_post(hidden_states)
-        hidden_states = self.proj1(hidden_states)
-        hidden_states = self.act(hidden_states)
-        hidden_states = self.proj2(hidden_states)
-
-        return hidden_states
 
 
 # ============================================================================
@@ -2245,222 +1530,11 @@ class FishQwen3OmniForCausalLM(FishQwen3PreTrainedModel):
 
 
 # ============================================================================
-# FishQwen3OmniForSequenceClassification - Omni model for sequence classification
-# ============================================================================
-
-
-@dataclass
-class FishQwen3OmniSequenceClassificationOutput:
-    """Output for FishQwen3OmniForSequenceClassification."""
-
-    loss: Optional[Tensor] = None
-    logits: Optional[Tensor] = None
-    hidden_states: Optional[Tensor] = None
-    router_logits: Optional[tuple] = None
-
-
-class FishQwen3OmniForSequenceClassification(FishQwen3PreTrainedModel):
-    """
-    FishQwen3Omni model for sequence classification (e.g., reward modeling).
-
-    This model combines audio encoder, text model, and optional audio decoder for
-    multimodal sequence classification tasks like reward modeling.
-
-    Similar to FishQwen3OmniForCausalLM but:
-    - Uses FishQwen3ForSequenceClassification as the text model
-    - Outputs classification logits instead of language modeling logits
-    - Does not support KV cache (not needed for classification)
-    """
-
-    config_class = FishQwen3OmniForSequenceClassificationConfig
-
-    def __init__(self, config: FishQwen3OmniForSequenceClassificationConfig):
-        super().__init__(config)
-        self.config = config
-        self.num_labels = config.num_labels
-
-        # Audio encoder component
-        self.audio_encoder = None
-        if config.audio_encoder_config is not None:
-            self.audio_encoder = FishQwen3AudioEncoder(config.audio_encoder_config)
-
-        # Text model component (sequence classification model)
-        self.text_model = FishQwen3ForSequenceClassification(config.text_config)
-
-        # Optional audio decoder for dual-AR models
-        self.audio_decoder = None
-        if config.audio_decoder_config is not None:
-            self.audio_decoder = FishQwen3AudioDecoder(config.audio_decoder_config)
-
-        self.post_init()
-
-    def embed(
-        self,
-        input_ids: Tensor,
-        audio_features: Optional[Tensor] = None,
-        audio_feature_lens: Optional[Tensor] = None,
-        audio_masks: Optional[Tensor] = None,
-        audio_feature_masks: Optional[Tensor] = None,
-        vq_parts: Optional[Tensor] = None,
-        vq_mask_tokens: Optional[Tensor] = None,
-    ) -> Tensor:
-        """
-        Prepare embeddings combining text, audio encoder, and VQ embeddings.
-
-        Args:
-            input_ids: Token IDs (seq_len,)
-            audio_features: Raw mel-spectrogram features (num_mel_bins, total_length)
-            audio_feature_lens: Lengths of audio features (batch_size,)
-            audio_masks: Boolean mask for audio positions in input_ids
-            audio_feature_masks: Boolean mask for audio feature positions
-            vq_parts: VQ codebook IDs for audio
-            vq_mask_tokens: Mask for VQ token positions
-
-        Returns:
-            Combined embeddings tensor
-        """
-        # Get text embeddings from the underlying model
-        x = self.text_model.model.embeddings(input_ids)
-
-        # Process audio through encoder if provided
-        if (
-            self.audio_encoder is not None
-            and audio_features is not None
-            and audio_feature_lens is not None
-        ):
-            audio_embeds = self.audio_encoder(audio_features, audio_feature_lens)
-            if audio_feature_masks is not None:
-                audio_embeds = audio_embeds[audio_feature_masks]
-
-            x[audio_masks] = audio_embeds.to(x.dtype)
-
-        # Add VQ embeddings if provided
-        if self.audio_decoder and vq_parts is not None and vq_mask_tokens is not None:
-            vq_embeds = self.audio_decoder.embed_text_dim(x, vq_parts, vq_mask_tokens)
-            x[vq_mask_tokens] = vq_embeds.to(x.dtype)
-
-        return x
-
-    def forward(
-        self,
-        input_ids: Tensor,
-        lengths: Tensor,
-        audio_features: Optional[Tensor] = None,
-        audio_feature_lens: Optional[Tensor] = None,
-        audio_masks: Optional[Tensor] = None,
-        audio_feature_masks: Optional[Tensor] = None,
-        vq_parts: Optional[Tensor] = None,
-        vq_mask_tokens: Optional[Tensor] = None,
-        labels: Optional[Tensor] = None,
-        **kwargs,
-    ) -> FishQwen3OmniSequenceClassificationOutput:
-        """
-        Forward pass for Omni sequence classification model.
-
-        Args:
-            input_ids: Token IDs (seq_len,)
-            lengths: Sequence lengths (batch_size,)
-            audio_features: Raw mel-spectrogram features (num_mel_bins, total_length)
-            audio_feature_lens: Lengths of audio features (batch_size,)
-            audio_masks: Boolean mask for audio positions in input_ids
-            audio_feature_masks: Boolean mask for audio feature positions
-            vq_parts: VQ codebook IDs for audio
-            vq_mask_tokens: Mask for VQ token positions
-            labels: Target labels for classification
-            **kwargs: Additional arguments
-
-        Returns:
-            FishQwen3OmniSequenceClassificationOutput with loss, logits, and hidden states
-        """
-        # Prepare embeddings combining text, audio encoder, and VQ embeddings
-        x = self.embed(
-            input_ids,
-            audio_features,
-            audio_feature_lens,
-            audio_masks,
-            audio_feature_masks,
-            vq_parts,
-            vq_mask_tokens,
-        )
-
-        # Get hidden states from the underlying FishQwen3Model
-        result = self.text_model.model(
-            lengths=lengths,
-            input_embeds=x,
-            **kwargs,
-        )
-
-        if self.text_model.config.use_moe:
-            hidden_states, router_logits, _ = result
-        else:
-            hidden_states = result
-            router_logits = None
-
-        # Compute classification scores
-        logits = self.text_model.score(hidden_states)
-
-        # Compute loss if labels provided
-        loss = None
-        if labels is not None:
-            if self.num_labels == 1:
-                # Regression
-                loss = F.binary_cross_entropy_with_logits(
-                    logits.squeeze(), labels.float().squeeze()
-                )
-            else:
-                # Classification
-                loss = F.cross_entropy(
-                    logits.view(-1, self.num_labels), labels.view(-1)
-                )
-
-        return FishQwen3OmniSequenceClassificationOutput(
-            loss=loss,
-            logits=logits,
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-        )
-
-    def set_trainable_modules(
-        self,
-        *,
-        audio_encoder: bool = True,
-        text_model: bool = True,
-        audio_decoder: bool = True,
-    ):
-        """Set which modules are trainable."""
-        if self.audio_encoder is not None:
-            for param in self.audio_encoder.parameters():
-                param.requires_grad = audio_encoder
-
-        for param in self.text_model.parameters():
-            param.requires_grad = text_model
-
-        if self.audio_decoder is not None:
-            for param in self.audio_decoder.parameters():
-                param.requires_grad = audio_decoder
-
-
-# ============================================================================
 # Register models with AutoModel/AutoConfig for automatic loading
 # ============================================================================
 
-# Register configs
 AutoConfig.register("fish_qwen3", FishQwen3Config)
 AutoConfig.register("fish_qwen3_omni", FishQwen3OmniConfig)
-AutoConfig.register(
-    "fish_qwen3_for_sequence_classification", FishQwen3ForSequenceClassificationConfig
-)
-AutoConfig.register(
-    "fish_qwen3_omni_for_sequence_classification",
-    FishQwen3OmniForSequenceClassificationConfig,
-)
 
-# Register models
 AutoModel.register(FishQwen3Config, FishQwen3ForCausalLM)
 AutoModel.register(FishQwen3OmniConfig, FishQwen3OmniForCausalLM)
-AutoModel.register(
-    FishQwen3ForSequenceClassificationConfig, FishQwen3ForSequenceClassification
-)
-AutoModel.register(
-    FishQwen3OmniForSequenceClassificationConfig, FishQwen3OmniForSequenceClassification
-)

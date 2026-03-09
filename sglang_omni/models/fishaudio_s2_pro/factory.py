@@ -39,6 +39,8 @@ def _patch_fish_config_for_sglang(model_path: str) -> None:
         self.hidden_size = self.dim
         self.num_hidden_layers = self.n_layer
         self.num_key_value_heads = self.n_local_heads
+        # S2-pro is trained in bf16
+        self.torch_dtype = torch.bfloat16
         if self.architectures is None:
             self.architectures = ["S2ProSGLangTextModel"]
 
