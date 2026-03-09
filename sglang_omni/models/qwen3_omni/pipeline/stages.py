@@ -385,6 +385,26 @@ def create_decode_executor(model_path: str) -> PreprocessingExecutor:
                 result["text"] = tokenizer.decode(output_ids, skip_special_tokens=True)
                 result.setdefault("modality", "text")
 
+        prompt_tokens = 0
+        prompt = state.prompt
+        if isinstance(prompt, dict):
+            input_ids = prompt.get("input_ids")
+            try:
+                prompt_tokens = len(input_ids)
+            except TypeError:
+                pass
+
+        output_ids = (
+            thinker_out.get("output_ids") if isinstance(thinker_out, dict) else None
+        )
+        completion_tokens = len(output_ids) if isinstance(output_ids, list) else 0
+
+        result["usage"] = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+
         payload.data = result
         return payload
 
