@@ -59,7 +59,7 @@ docker run -it --shm-size 32g --gpus all frankleeeee/sglang-omni:dev /bin/zsh
 ### Install sglang-omni (inside Docker)
 
 ```bash
-git clone https://github.com/sgl-project-dev/sglang-omni.git
+git clone https://github.com/sgl-project/sglang-omni.git
 cd sglang-omni
 uv venv .venv -p 3.12 && source .venv/bin/activate
 uv pip install -v ".[s2pro]"
