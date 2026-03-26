@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import torch
 
@@ -64,7 +64,7 @@ def _truncate_rope_to_bf16(model: torch.nn.Module) -> None:
 
 def create_s2pro_sglang_engine(
     server_args: Any,
-    audio_decoder: torch.nn.Module,
+    audio_decoder: Optional[torch.nn.Module] = None,  # Optional: use internal if None
     tokenizer: Any = None,
     *,
     gpu_id: int = 0,
@@ -76,7 +76,25 @@ def create_s2pro_sglang_engine(
     ras_temperature: float = 1.5,
     ras_top_p: float = 0.95,
 ) -> OmniEngine:
-    """Create a unified S2-Pro engine (slow+fast head in one CUDA graph)."""
+    """Create a unified S2-Pro engine (slow+fast head in one CUDA graph).
+
+    Args:
+        server_args: SGLang server arguments.
+        audio_decoder: Optional external audio decoder. If None, the model
+                       must have been created with audio_decoder_config (TP-safe).
+        tokenizer: Tokenizer instance.
+        gpu_id: GPU device ID.
+        num_codebooks: Number of codebooks for audio generation.
+        codebook_size: Size of each codebook.
+        max_new_tokens: Maximum number of tokens to generate.
+        top_k: Top-k sampling parameter.
+        ras_window: RAS (rejection-annealed sampling) window size.
+        ras_temperature: RAS temperature.
+        ras_top_p: RAS top-p parameter.
+
+    Returns:
+        OmniEngine instance.
+    """
     from sglang_omni.engines.ar.sglang_backend.model_worker import (
         ModelWorker,
         ModelWorkerConfig,
@@ -117,16 +135,39 @@ def create_s2pro_sglang_engine(
     # Set up unified decode: slow head + fast head in one forward
     text_model = model_worker.model_runner.model
     max_bs = server_args.max_running_requests
-    audio_decoder.setup_caches(max_batch_size=max_bs, dtype=torch.bfloat16)
-    text_model.setup_vq_decode(
-        audio_decoder,
-        num_codebooks=num_codebooks,
-        codebook_size=codebook_size,
-        semantic_begin_id=semantic_begin_id,
-        semantic_end_id=semantic_end_id,
-        im_end_id=im_end_id,
-        max_batch_size=max_bs,
-    )
+
+    if audio_decoder is not None:
+        # Backward compatibility: use externally provided audio decoder
+        audio_decoder.setup_caches(max_batch_size=max_bs, dtype=torch.bfloat16)
+        text_model.setup_vq_decode(
+            audio_decoder,
+            num_codebooks=num_codebooks,
+            codebook_size=codebook_size,
+            semantic_begin_id=semantic_begin_id,
+            semantic_end_id=semantic_end_id,
+            im_end_id=im_end_id,
+            max_batch_size=max_bs,
+        )
+    elif (
+        hasattr(text_model, "_audio_decoder") and text_model._audio_decoder is not None
+    ):
+        # TP-safe: use internal audio decoder (created with audio_decoder_config)
+        text_model._audio_decoder.setup_caches(
+            max_batch_size=max_bs, dtype=torch.bfloat16
+        )
+        text_model.setup_vq_decode_internal(
+            num_codebooks=num_codebooks,
+            codebook_size=codebook_size,
+            semantic_begin_id=semantic_begin_id,
+            semantic_end_id=semantic_end_id,
+            im_end_id=im_end_id,
+            max_batch_size=max_bs,
+        )
+    else:
+        raise ValueError(
+            "Audio decoder not available. Either pass audio_decoder parameter or "
+            "ensure the model was created with audio_decoder_config in the checkpoint."
+        )
 
     # Now capture CUDA graphs with _decode_codebooks in the graph
     if want_cuda_graph:
