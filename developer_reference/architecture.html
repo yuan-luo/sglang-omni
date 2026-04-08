@@ -58,7 +58,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.1.0" />
-    <meta name="docbuild:last-update" content="Apr 05, 2026"/>
+    <meta name="docbuild:last-update" content="Apr 08, 2026"/>
   </head>
   
   
@@ -157,6 +157,7 @@
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Basic Usage</span></p>
 <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../basic_usage/qwen3_omni.html">Omni Model Usage</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/tts_s2pro.html">TTS Model Usage</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmarks</span></p>
@@ -520,6 +521,8 @@
 <li><p>Returns a <code class="docutils literal notranslate"><span class="pre">(Coordinator,</span> <span class="pre">[Stage,</span> <span class="pre">...])</span></code> tuple.</p></li>
 </ol>
 <p>The <code class="docutils literal notranslate"><span class="pre">PipelineRunner</span></code> manages the lifecycle — starting the coordinator and all stages, then waiting for completion or errors.</p>
+<p>For managed IPC startup, prefer <code class="docutils literal notranslate"><span class="pre">build_pipeline_runner()</span></code>. The lower-level
+<code class="docutils literal notranslate"><span class="pre">compile_pipeline()</span></code> helper rejects unmanaged IPC usage.</p>
 </section>
 <section id="coordinator">
 <h3>Coordinator<a class="headerlink" href="#coordinator" title="Link to this heading">#</a></h3>
@@ -729,8 +732,8 @@
 <section id="configuration-example">
 <h2>Configuration Example<a class="headerlink" href="#configuration-example" title="Link to this heading">#</a></h2>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">sglang_omni.config</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
-    <span class="n">ExecutorConfig</span><span class="p">,</span> <span class="n">PipelineConfig</span><span class="p">,</span> <span class="n">PipelineRunner</span><span class="p">,</span>
-    <span class="n">StageConfig</span><span class="p">,</span> <span class="n">compile_pipeline</span><span class="p">,</span>
+    <span class="n">ExecutorConfig</span><span class="p">,</span> <span class="n">PipelineConfig</span><span class="p">,</span> <span class="n">StageConfig</span><span class="p">,</span>
+    <span class="n">build_pipeline_runner</span><span class="p">,</span>
 <span class="p">)</span>
 
 <span class="n">config</span> <span class="o">=</span> <span class="n">PipelineConfig</span><span class="p">(</span>
@@ -756,8 +759,7 @@
     <span class="p">],</span>
 <span class="p">)</span>
 
-<span class="n">coordinator</span><span class="p">,</span> <span class="n">stages</span> <span class="o">=</span> <span class="n">compile_pipeline</span><span class="p">(</span><span class="n">config</span><span class="p">)</span>
-<span class="n">runner</span> <span class="o">=</span> <span class="n">PipelineRunner</span><span class="p">(</span><span class="n">coordinator</span><span class="p">,</span> <span class="n">stages</span><span class="p">)</span>
+<span class="n">runner</span> <span class="o">=</span> <span class="n">build_pipeline_runner</span><span class="p">(</span><span class="n">config</span><span class="p">)</span>
 </pre></div>
 </div>
 </section>
@@ -913,7 +915,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Apr 05, 2026.
+  Last updated on Apr 08, 2026.
   <br/>
 </p>
   </div>
