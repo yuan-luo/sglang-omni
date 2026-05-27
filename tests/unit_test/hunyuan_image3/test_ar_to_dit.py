@@ -34,7 +34,9 @@ class TestBuildRatioSizeTable:
 
     def test_sorted_ascending_by_aspect(self):
         table = build_ratio_size_table(1024)
-        ratios = [h / w for (h, w) in table[:-4]]  # last 4 are named extras, may not sort
+        ratios = [
+            h / w for (h, w) in table[:-4]
+        ]  # last 4 are named extras, may not sort
         assert ratios == sorted(ratios)
 
     def test_named_extras_appended(self):
@@ -116,9 +118,7 @@ class TestExtractRatioIndex:
 
     def test_extras_ratio_33(self):
         assert (
-            extract_ratio_index(
-                [HUNYUAN_IMAGE3_SPECIAL_TOKEN_IDS["<img_ratio_33>"]]
-            )
+            extract_ratio_index([HUNYUAN_IMAGE3_SPECIAL_TOKEN_IDS["<img_ratio_33>"]])
             == 33
         )
 
@@ -160,10 +160,7 @@ class TestResolveDimensions:
 class TestTruncateAtCotEnd:
     def test_truncates_at_recaption_close(self):
         text = "<recaption>detailed prompt</recaption><answer><boi><img_size_base><img_ratio_4>"
-        assert (
-            _truncate_at_cot_end(text)
-            == "<recaption>detailed prompt</recaption>"
-        )
+        assert _truncate_at_cot_end(text) == "<recaption>detailed prompt</recaption>"
 
     def test_truncates_at_think_close_when_no_recaption(self):
         text = "<think>reasoning</think>tail"

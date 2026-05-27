@@ -105,9 +105,13 @@ def _make_exporter(num_layers: int, pool_size: int, max_seq: int, num_reqs: int)
     k_buffers, v_buffers = [], []
     for layer_id in range(num_layers):
         # Distinctive per-(layer, slot) signature: layer_id * 1000 + slot.
-        k = torch.arange(pool_size, dtype=torch.float32).view(pool_size, 1, 1).expand(
-            pool_size, 2, 4
-        ).contiguous() + layer_id * 1000
+        k = (
+            torch.arange(pool_size, dtype=torch.float32)
+            .view(pool_size, 1, 1)
+            .expand(pool_size, 2, 4)
+            .contiguous()
+            + layer_id * 1000
+        )
         v = -k
         k_buffers.append(k)
         v_buffers.append(v)
@@ -127,9 +131,7 @@ def _make_exporter(num_layers: int, pool_size: int, max_seq: int, num_reqs: int)
 
 class TestKVExporterGather:
     def test_gather_full_prefix(self):
-        exporter = _make_exporter(
-            num_layers=3, pool_size=512, max_seq=64, num_reqs=2
-        )
+        exporter = _make_exporter(num_layers=3, pool_size=512, max_seq=64, num_reqs=2)
         per_layer = exporter.gather_request(rid=1, seq_len=10)
         assert set(per_layer.keys()) == {0, 1, 2}
         for layer_id, kv in per_layer.items():
@@ -141,9 +143,7 @@ class TestKVExporterGather:
             assert kv.v[0, 0, 0].item() == pytest.approx(-expected_first)
 
     def test_gather_is_a_copy_not_alias(self):
-        exporter = _make_exporter(
-            num_layers=2, pool_size=256, max_seq=32, num_reqs=1
-        )
+        exporter = _make_exporter(num_layers=2, pool_size=256, max_seq=32, num_reqs=1)
         per_layer = exporter.gather_request(rid=0, seq_len=5, clone=True)
         # Mutating output should not affect the pool.
         per_layer[0].k.fill_(-999.0)
@@ -152,25 +152,21 @@ class TestKVExporterGather:
         assert not torch.equal(per_layer[0].k, per_layer2[0].k)
 
     def test_invalid_seq_len_raises(self):
-        exporter = _make_exporter(
-            num_layers=1, pool_size=64, max_seq=8, num_reqs=1
-        )
+        exporter = _make_exporter(num_layers=1, pool_size=64, max_seq=8, num_reqs=1)
         with pytest.raises(ValueError, match="seq_len must be positive"):
             exporter.gather_request(rid=0, seq_len=0)
 
     def test_gather_layer_range(self):
-        exporter = _make_exporter(
-            num_layers=4, pool_size=256, max_seq=32, num_reqs=1
+        exporter = _make_exporter(num_layers=4, pool_size=256, max_seq=32, num_reqs=1)
+        out = exporter.gather_request_layer_range(
+            rid=0, seq_len=3, layer_start=1, layer_stop=3
         )
-        out = exporter.gather_request_layer_range(rid=0, seq_len=3, layer_start=1, layer_stop=3)
         assert set(out.keys()) == {1, 2}
         # Layer 0 not included.
         assert 0 not in out
 
     def test_layer_range_out_of_bounds_raises(self):
-        exporter = _make_exporter(
-            num_layers=4, pool_size=256, max_seq=32, num_reqs=1
-        )
+        exporter = _make_exporter(num_layers=4, pool_size=256, max_seq=32, num_reqs=1)
         with pytest.raises(ValueError, match="not within owned"):
             exporter.gather_request_layer_range(
                 rid=0, seq_len=3, layer_start=2, layer_stop=10

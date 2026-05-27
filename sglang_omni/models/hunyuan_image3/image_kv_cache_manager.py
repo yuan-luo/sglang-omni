@@ -25,7 +25,7 @@ stages because AR and DiT share the same 80B backbone.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import torch

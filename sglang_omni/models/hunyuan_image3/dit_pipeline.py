@@ -35,10 +35,7 @@ from typing import Any, Optional, Protocol
 
 import torch
 
-from sglang_omni.models.hunyuan_image3.image_kv_cache_manager import (
-    ImageKVCacheManager,
-    PromptKVSlice,
-)
+from sglang_omni.models.hunyuan_image3.image_kv_cache_manager import ImageKVCacheManager
 
 logger = logging.getLogger(__name__)
 
@@ -287,9 +284,9 @@ class HunyuanImage3DiTPipeline:
         schedule (sigmoid / shifted) is part of the M2 port; this default
         keeps the pipeline runnable end-to-end with stub backends.
         """
-        return torch.linspace(
-            1.0, 0.0, steps=n_steps + 1, device=self.backend.device
-        )[:-1]
+        return torch.linspace(1.0, 0.0, steps=n_steps + 1, device=self.backend.device)[
+            :-1
+        ]
 
     def _flow_update(
         self,

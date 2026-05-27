@@ -160,9 +160,7 @@ class KVExporter:
         layer_start / layer_stop are absolute layer indices. They must be
         within [self.start_layer, self.end_layer).
         """
-        if not (
-            self.start_layer <= layer_start < layer_stop <= self.end_layer
-        ):
+        if not (self.start_layer <= layer_start < layer_stop <= self.end_layer):
             raise ValueError(
                 f"layer range [{layer_start}, {layer_stop}) not within owned "
                 f"layers [{self.start_layer}, {self.end_layer})"

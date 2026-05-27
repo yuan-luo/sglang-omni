@@ -36,21 +36,16 @@ from collections.abc import Iterable
 from typing import Any, Optional, Tuple
 
 import torch
-from torch import nn
-
-from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
-    ColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
-from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
 from sglang.srt.layers.moe.utils import RoutingMethodType
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
@@ -62,7 +57,7 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-
+from torch import nn
 
 # Pre-compiled patterns for MoE expert weight remap.
 _EXPERT_GATE_UP_RE = re.compile(
@@ -425,7 +420,9 @@ class HunyuanImage3Model(nn.Module):
             hidden_states = input_embeds
         residual = None
         for layer in self.layers:
-            hidden_states, residual = layer(positions, hidden_states, residual, forward_batch)
+            hidden_states, residual = layer(
+                positions, hidden_states, residual, forward_batch
+            )
         if residual is not None:
             hidden_states, _ = self.norm(hidden_states, residual)
         else:
@@ -473,7 +470,9 @@ class HunyuanImage3ForConditionalGeneration(nn.Module):
         input_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
-        return self.logits_processor(input_ids, hidden_states, self.lm_head, forward_batch)
+        return self.logits_processor(
+            input_ids, hidden_states, self.lm_head, forward_batch
+        )
 
     def get_input_embeddings(self) -> VocabParallelEmbedding:
         """Embedding module — entry point for multimodal injection paths."""

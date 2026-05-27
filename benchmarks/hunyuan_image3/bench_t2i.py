@@ -185,7 +185,9 @@ def _one_measurement(
         "bot_task": bot_task,
     }
     t0 = time.perf_counter()
-    code, parsed, err = _post(endpoint + "/v1/images/generations", body, timeout=timeout)
+    code, parsed, err = _post(
+        endpoint + "/v1/images/generations", body, timeout=timeout
+    )
     e2e_ms = (time.perf_counter() - t0) * 1000.0
     return code, parsed, err, e2e_ms
 
@@ -286,7 +288,9 @@ def run_sweep(
                             )
                             row = MeasurementRow(
                                 commit_sha=commit_sha,
-                                timestamp=datetime.utcnow().isoformat(timespec="seconds"),
+                                timestamp=datetime.utcnow().isoformat(
+                                    timespec="seconds"
+                                ),
                                 model=model,
                                 bot_task=bot_task,
                                 steps=steps,
@@ -318,7 +322,9 @@ def run_sweep(
                             )
                             row = MeasurementRow(
                                 commit_sha=commit_sha,
-                                timestamp=datetime.utcnow().isoformat(timespec="seconds"),
+                                timestamp=datetime.utcnow().isoformat(
+                                    timespec="seconds"
+                                ),
                                 model=model,
                                 bot_task=bot_task,
                                 steps=steps,
@@ -356,12 +362,19 @@ def print_summary(csv_path: Path) -> None:
             by_cell.setdefault(key, []).append(e2e)
 
     print("\n=== Warm-run median latency (ms) ===", file=sys.stderr)
-    print(f"{'bot_task':<18} {'steps':>6} {'n':>4} {'median':>10} {'p99':>10}", file=sys.stderr)
+    print(
+        f"{'bot_task':<18} {'steps':>6} {'n':>4} {'median':>10} {'p99':>10}",
+        file=sys.stderr,
+    )
     for (bot_task, steps), values in sorted(by_cell.items()):
         if not values:
             continue
         med = statistics.median(values)
-        p99 = max(values) if len(values) < 100 else sorted(values)[int(len(values) * 0.99)]
+        p99 = (
+            max(values)
+            if len(values) < 100
+            else sorted(values)[int(len(values) * 0.99)]
+        )
         print(
             f"{bot_task:<18} {steps:>6} {len(values):>4} {med:>10.0f} {p99:>10.0f}",
             file=sys.stderr,

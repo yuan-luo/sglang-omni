@@ -39,9 +39,7 @@ def create_hunyuan_image3_dit_scheduler(
     Returns:
       A `SimpleScheduler` wrapping the pipeline's async dispatch handler.
     """
-    from sglang_omni.models.hunyuan_image3.dit_pipeline import (
-        HunyuanImage3DiTPipeline,
-    )
+    from sglang_omni.models.hunyuan_image3.dit_pipeline import HunyuanImage3DiTPipeline
     from sglang_omni.proto import StagePayload
     from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 

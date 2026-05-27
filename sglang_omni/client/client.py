@@ -24,7 +24,6 @@ from sglang_omni.client.types import (
     CompletionStreamChunk,
     GenerateChunk,
     GenerateRequest,
-    ImageItem,
     ImagesResult,
     SpeechResult,
     UsageInfo,
@@ -247,10 +246,7 @@ class Client:
         """
         from base64 import b64encode
 
-        from sglang_omni.client.types import (
-            ImageItem,
-            ImagesResult,
-        )
+        from sglang_omni.client.types import ImageItem, ImagesResult
 
         image_bytes_chunks: list[bytes] = []
         image_format: str | None = None
@@ -306,7 +302,8 @@ class Client:
         return ImagesResult(
             images=items,
             output_format=image_format or requested_format,
-            size=image_size or (str(params.get("size")) if params.get("size") else None),
+            size=image_size
+            or (str(params.get("size")) if params.get("size") else None),
             cot_output=cot_output,
             usage=last_chunk.usage if last_chunk else None,
         )

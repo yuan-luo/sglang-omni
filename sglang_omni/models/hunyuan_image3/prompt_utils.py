@@ -95,7 +95,11 @@ _TASK_PRESETS: dict[str, tuple[str, str | None, str | None]] = {
     "t2i_recaption": ("en_unified", "recaption", "<recaption>"),
 }
 
-_LEGACY_COMPOSITE_TASKS: frozenset[str] = frozenset(_TASK_PRESETS) - {"t2t", "i2t", "t2i"}
+_LEGACY_COMPOSITE_TASKS: frozenset[str] = frozenset(_TASK_PRESETS) - {
+    "t2t",
+    "i2t",
+    "t2i",
+}
 
 
 def _normalize_task_and_bot_task(
@@ -138,7 +142,9 @@ def available_bot_tasks() -> list[str | None]:
 def resolve_sys_type(bot_task: str | None) -> str:
     """Default system-prompt type for a given ``bot_task``."""
     if bot_task not in _BOT_TASK_PRESETS:
-        raise ValueError(f"Unknown bot_task {bot_task!r}. Choose from: {available_bot_tasks()}")
+        raise ValueError(
+            f"Unknown bot_task {bot_task!r}. Choose from: {available_bot_tasks()}"
+        )
     return _BOT_TASK_PRESETS[bot_task][0]
 
 
@@ -169,7 +175,9 @@ def resolve_stop_token_ids(
     if task not in _TASKS:
         raise ValueError(f"Unknown task {task!r}. Choose from: {available_tasks()}")
     if bot_task not in _BOT_TASK_PRESETS:
-        raise ValueError(f"Unknown bot_task {bot_task!r}. Choose from: {available_bot_tasks()}")
+        raise ValueError(
+            f"Unknown bot_task {bot_task!r}. Choose from: {available_bot_tasks()}"
+        )
     if task in ("it2i", "t2i"):
         # Main ratio range: <img_ratio_0> .. <img_ratio_32>.
         start = HUNYUAN_IMAGE3_SPECIAL_TOKEN_IDS["<img_ratio_0>"]
@@ -190,7 +198,9 @@ MAX_IMAGES_PER_REQUEST = 3
 
 def _validate_num_images(num_images: int) -> None:
     if not (1 <= num_images <= MAX_IMAGES_PER_REQUEST):
-        raise ValueError(f"num_images must be in [1, {MAX_IMAGES_PER_REQUEST}], got {num_images}")
+        raise ValueError(
+            f"num_images must be in [1, {MAX_IMAGES_PER_REQUEST}], got {num_images}"
+        )
 
 
 def _resolve_preset(task: str, bot_task: str | None) -> tuple[str, str | None]:
@@ -199,9 +209,13 @@ def _resolve_preset(task: str, bot_task: str | None) -> tuple[str, str | None]:
     if task not in _TASKS:
         raise ValueError(f"Unknown task {task!r}. Choose from: {available_tasks()}")
     if bot_task not in _BOT_TASK_PRESETS:
-        raise ValueError(f"Unknown bot_task {bot_task!r}. Choose from: {available_bot_tasks()}")
+        raise ValueError(
+            f"Unknown bot_task {bot_task!r}. Choose from: {available_bot_tasks()}"
+        )
     if bot_task == "vanilla" and task != "t2i":
-        raise ValueError(f"bot_task='vanilla' is only valid with task='t2i' (pretrain template); got task={task!r}")
+        raise ValueError(
+            f"bot_task='vanilla' is only valid with task='t2i' (pretrain template); got task={task!r}"
+        )
     return _BOT_TASK_PRESETS[bot_task]
 
 
@@ -218,7 +232,9 @@ def build_prompt(
     preset_sys_type, trigger_tag = _resolve_preset(task, bot_task)
     effective_sys_type = sys_type or preset_sys_type
 
-    system_prompt = get_system_prompt(effective_sys_type, bot_task, custom_system_prompt)
+    system_prompt = get_system_prompt(
+        effective_sys_type, bot_task, custom_system_prompt
+    )
     sys_text = system_prompt or ""
 
     has_image_input = task in ("i2t", "it2i")
@@ -287,7 +303,9 @@ def build_prompt_tokens(
             system_prompt_type=effective_sys_type,
         )
 
-    system_prompt = get_system_prompt(effective_sys_type, bot_task, custom_system_prompt)
+    system_prompt = get_system_prompt(
+        effective_sys_type, bot_task, custom_system_prompt
+    )
     sys_text = system_prompt or ""
 
     ids: list[int] = [bos_id]

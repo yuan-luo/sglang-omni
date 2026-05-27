@@ -43,7 +43,9 @@ def make_ar_scheduler_adapters(
 
     def request_builder(payload):
         from sglang.srt.managers.schedule_batch import Req
-        from sglang.srt.sampling.sampling_params import SamplingParams as SGLSamplingParams
+        from sglang.srt.sampling.sampling_params import (
+            SamplingParams as SGLSamplingParams,
+        )
 
         from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
 
@@ -51,7 +53,9 @@ def make_ar_scheduler_adapters(
         req_data = payload.request
         params = (req_data.params or {}) if req_data is not None else {}
         prompt_text = _extract_prompt_text(payload)
-        bot_task = params.get("bot_task")  # None / vanilla / recaption / think / think_recaption
+        bot_task = params.get(
+            "bot_task"
+        )  # None / vanilla / recaption / think / think_recaption
         sys_type = params.get("sys_type")  # optional; defaults derived from bot_task
         custom_system_prompt = params.get("system_prompt")
         # HunyuanImage-3 AR is the t2i image-generation backbone. i2t/it2i
