@@ -137,6 +137,17 @@ class GenerateChunk:
     modality: str = "text"
     audio_data: Any = None
     sample_rate: int | None = None
+    # Image-generation pipelines emit one or more images per request. Each
+    # element is the raw encoded image bytes (PNG/JPEG/etc per
+    # `image_format`). The list grows across chunks in case the pipeline
+    # streams partial-batch outputs, though current pipelines only emit a
+    # single terminal chunk with all `n` images.
+    image_data: list[bytes] | None = None
+    image_format: str | None = None
+    image_size: str | None = None  # "768x1024" / "1024x1024" / ...
+    # AR-generated text (recaption / think trace). Truncated at
+    # `</recaption>` or `</think>` by the pipeline.
+    cot_output: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -152,6 +163,10 @@ class GenerateChunk:
             "modality": self.modality,
             "audio_data": self.audio_data,
             "sample_rate": self.sample_rate,
+            "image_data": self.image_data,
+            "image_format": self.image_format,
+            "image_size": self.image_size,
+            "cot_output": self.cot_output,
         }
 
 
@@ -216,6 +231,35 @@ class SpeechResult:
     audio_bytes: bytes
     mime_type: str
     format: str
+    usage: UsageInfo | None = None
+
+
+@dataclass
+class ImageItem:
+    """A single image returned by an image-generation call.
+
+    Exactly one of `b64_json` or `url` is populated depending on the
+    request's `response_format`. `revised_prompt` is the AR-rewritten
+    prompt text when a PE bot_task was active, otherwise None.
+    """
+
+    b64_json: str | None = None
+    url: str | None = None
+    revised_prompt: str | None = None
+
+
+@dataclass
+class ImagesResult:
+    """Result of an image-generation call."""
+
+    images: list[ImageItem]
+    output_format: str
+    size: str | None = None
+    # AR chain-of-thought / recaption text aggregated across the request's
+    # produced images (typically all identical for `n=1`). Truncated at
+    # `</recaption>` or `</think>`. None when AR text capture is disabled
+    # or `bot_task=vanilla`.
+    cot_output: str | None = None
     usage: UsageInfo | None = None
 
 

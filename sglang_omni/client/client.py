@@ -24,6 +24,8 @@ from sglang_omni.client.types import (
     CompletionStreamChunk,
     GenerateChunk,
     GenerateRequest,
+    ImageItem,
+    ImagesResult,
     SpeechResult,
     UsageInfo,
 )
@@ -218,6 +220,94 @@ class Client:
             audio_bytes=audio_bytes,
             mime_type=mime_type,
             format=actual_format,
+            usage=last_chunk.usage if last_chunk else None,
+        )
+
+    # ------------------------------------------------------------------
+    # High-level: text-to-image (and image editing)
+    # ------------------------------------------------------------------
+
+    async def images(
+        self,
+        request: GenerateRequest,
+        *,
+        request_id: str,
+    ) -> "ImagesResult":
+        """Run a t2i / it2i request and return one or more images.
+
+        Aggregates `GenerateChunk.image_data` across the response stream.
+        Most diffusion pipelines emit a single terminal chunk carrying all
+        `n` requested images plus the AR-side `cot_output` text; the loop
+        below handles the multi-chunk case for forward compatibility.
+
+        Raises:
+            ClientError: when the pipeline finishes without producing image
+              bytes (e.g. the AR stage stopped before reaching the ratio
+              token, or DiT failed silently).
+        """
+        from base64 import b64encode
+
+        from sglang_omni.client.types import (
+            ImageItem,
+            ImagesResult,
+        )
+
+        image_bytes_chunks: list[bytes] = []
+        image_format: str | None = None
+        image_size: str | None = None
+        cot_output: str | None = None
+        last_chunk: GenerateChunk | None = None
+
+        # Force non-streaming behavior — images() returns one terminal payload.
+        extra_params = dict(request.extra_params)
+        extra_params.pop("stream", None)
+        request = replace(request, stream=False, extra_params=extra_params)
+
+        params = request.params or {}
+        response_format = str(params.get("response_format") or "b64_json")
+        requested_format = str(params.get("output_format") or "png")
+
+        async for chunk in self.generate(request, request_id=request_id):
+            if chunk.image_data:
+                image_bytes_chunks.extend(chunk.image_data)
+            if chunk.image_format is not None:
+                image_format = chunk.image_format
+            if chunk.image_size is not None:
+                image_size = chunk.image_size
+            if chunk.cot_output is not None:
+                cot_output = chunk.cot_output
+            last_chunk = chunk
+
+        if not image_bytes_chunks:
+            raise ClientError(
+                "No image output from pipeline. The AR stage may have stopped "
+                "before reaching the image-ratio token, or the DiT stage failed."
+            )
+
+        # Encode per `response_format`. The server-side adapter handles "url"
+        # uploads if configured; in standalone mode we always pass b64.
+        items: list[ImageItem] = []
+        for raw in image_bytes_chunks:
+            if response_format == "url":
+                # Pipelines that produce URLs ship them as ASCII in image_data
+                # (decoded as utf-8 here). Fall back to b64 if decode fails.
+                try:
+                    items.append(ImageItem(url=raw.decode("ascii")))
+                    continue
+                except (UnicodeDecodeError, AttributeError):
+                    pass
+            items.append(
+                ImageItem(
+                    b64_json=b64encode(raw).decode("ascii"),
+                    revised_prompt=cot_output if cot_output else None,
+                )
+            )
+
+        return ImagesResult(
+            images=items,
+            output_format=image_format or requested_format,
+            size=image_size or (str(params.get("size")) if params.get("size") else None),
+            cot_output=cot_output,
             usage=last_chunk.usage if last_chunk else None,
         )
 

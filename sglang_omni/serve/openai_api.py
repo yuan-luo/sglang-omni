@@ -4,6 +4,7 @@
 Provides the following endpoints:
 - POST /v1/chat/completions  — Text (+ audio) chat completions
 - POST /v1/audio/speech      — Text-to-speech synthesis
+- POST /v1/images/generations — Text-to-image generation
 - GET  /v1/models            — List available models
 - GET  /v1/fs/list           — Browse filesystem directories
 - GET  /v1/fs/file           — Download a file
@@ -46,6 +47,9 @@ from sglang_omni.serve.protocol import (
     ChatCompletionStreamDelta,
     ChatCompletionStreamResponse,
     CreateSpeechRequest,
+    ImagesGenerationDataItem,
+    ImagesGenerationRequest,
+    ImagesGenerationResponse,
     ModelCard,
     ModelList,
     UsageResponse,
@@ -103,6 +107,7 @@ def create_app(
     _register_models(app)
     _register_chat_completions(app)
     _register_speech(app)
+    _register_images(app)
     if enable_realtime:
         _register_realtime(app)
 
@@ -484,6 +489,79 @@ def _register_realtime(app: FastAPI) -> None:
             await session.run()
         finally:
             await manager.close(session.session_id)
+
+
+def _register_images(app: FastAPI) -> None:
+    @app.post("/v1/images/generations")
+    async def create_image(req: ImagesGenerationRequest) -> ImagesGenerationResponse:
+        client: Client = app.state.client
+        default_model: str = app.state.model_name
+
+        request_id = req.request_id or f"img_gen-{uuid.uuid4().hex[:16]}"
+
+        # Translate the OpenAI-style request into a GenerateRequest the
+        # Client recognizes. Diffusion-specific fields (size / steps /
+        # guidance / bot_task / etc.) flow through `params` so the pipeline
+        # adapter can route them to the right stage(s).
+        params: dict[str, Any] = {
+            "n": req.n,
+            "response_format": req.response_format,
+            "output_format": req.output_format,
+        }
+        if req.size is not None:
+            params["size"] = req.size
+        if req.seed is not None:
+            params["seed"] = req.seed
+        if req.num_inference_steps is not None:
+            params["num_inference_steps"] = req.num_inference_steps
+        if req.guidance_scale is not None:
+            params["guidance_scale"] = req.guidance_scale
+        if req.bot_task is not None:
+            params["bot_task"] = req.bot_task
+        if req.sys_type is not None:
+            params["sys_type"] = req.sys_type
+        if req.system_prompt is not None:
+            params["system_prompt"] = req.system_prompt
+        if req.output_compression is not None:
+            params["output_compression"] = req.output_compression
+        if req.stage_sampling:
+            params["stage_sampling"] = req.stage_sampling
+
+        gen_req = GenerateRequest(
+            model=req.model or default_model,
+            prompt=req.prompt,
+            user=req.user,
+            params=params,
+        )
+
+        try:
+            result = await client.images(gen_req, request_id=request_id)
+        except ClientError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.exception("Error generating image for request %s", request_id)
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        # The pipeline returns one or more images plus optional CoT/recaption text.
+        data_items: list[ImagesGenerationDataItem] = []
+        for img in result.images:
+            if req.response_format == "url":
+                data_items.append(ImagesGenerationDataItem(url=img.url))
+            else:
+                data_items.append(
+                    ImagesGenerationDataItem(
+                        b64_json=img.b64_json,
+                        revised_prompt=img.revised_prompt,
+                    )
+                )
+
+        return ImagesGenerationResponse(
+            created=int(time.time()),
+            data=data_items,
+            output_format=result.output_format,
+            size=result.size,
+            cot_output=result.cot_output,
+        )
 
 
 def _register_speech(app: FastAPI) -> None:

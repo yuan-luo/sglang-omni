@@ -240,3 +240,68 @@ class ModelList(BaseModel):
 
     object: str = "list"
     data: list[ModelCard] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Image generation (POST /v1/images/generations)
+# ---------------------------------------------------------------------------
+class ImagesGenerationRequest(BaseModel):
+    """OpenAI-compatible image generation request, with diffusion extensions."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    # OpenAI canonical fields.
+    model: str | None = None
+    prompt: str
+    n: int = 1
+    size: str | None = None  # "1024x1024" / "768x1024" / "auto"
+    response_format: str = "b64_json"  # "b64_json" | "url"
+    user: str | None = None
+
+    # Diffusion extensions.
+    output_format: str = "png"  # "png" | "jpeg" | "webp"
+    output_compression: int | None = None  # 0..100 for jpeg/webp
+    seed: int | None = None
+    num_inference_steps: int | None = None
+    guidance_scale: float | None = None
+
+    # Image-aware prompt routing.
+    # `bot_task` ∈ {None, "vanilla", "recaption", "think", "think_recaption"}
+    # selects (sys_type, trigger_tag) for the AR backbone.
+    bot_task: str | None = None
+    # `sys_type` overrides the default system-prompt template for the
+    # selected bot_task. Rarely needed; allows callers to swap in a custom
+    # template (e.g. en_recaption for direct rewrite without unified flow).
+    sys_type: str | None = None
+    # When `sys_type="custom"`, the caller supplies the literal system prompt
+    # body here.
+    system_prompt: str | None = None
+
+    # Per-stage sampling overrides — keyed by stage name. Use this to bound
+    # AR decode (e.g. {"ar": {"max_tokens": 1024}}) without touching DiT.
+    stage_sampling: dict[str, dict[str, Any]] | None = None
+
+    # Request id (server-generated if absent).
+    request_id: str | None = None
+
+
+class ImagesGenerationDataItem(BaseModel):
+    """Single image produced by a generation request."""
+
+    b64_json: str | None = None
+    url: str | None = None
+    revised_prompt: str | None = None
+
+
+class ImagesGenerationResponse(BaseModel):
+    """OpenAI-compatible image generation response."""
+
+    created: int
+    data: list[ImagesGenerationDataItem]
+    output_format: str
+    size: str | None = None
+    # AR chain-of-thought / recaption text. Populated for
+    # `bot_task ∈ {recaption, think, think_recaption}`; truncated at the
+    # closing `</recaption>` or `</think>` tag. None for `bot_task=vanilla`
+    # and when AR text capture is disabled.
+    cot_output: str | None = None
